@@ -44,15 +44,15 @@ signal:
 risk:
   max_t_size_ratio: 0.25            # 单次T仓位比例上限（底仓的 25%）
   max_t_trades_per_day: 4           # 每日最大T次数
-  min_capture_spread: 0.0075        # 最小预期捕获空间（0.75%，扣除0.3%成本后净0.45%）
-  round_trip_cost: 0.003            # 来回成本（0.3% = 佣金万2.5×2 + 印花税0.05% + 滑点0.1%×2）
+  min_capture_spread: 0.0072        # 最小预期捕获空间（0.72%，扣除0.27%成本后净0.45%）
+  round_trip_cost: 0.0027           # 来回成本（0.27% = 佣金万1×2 + 印花税0.05% + 滑点0.1%×2）
   min_net_expected_return: 0.0045   # 最小净期望收益（0.45%，扣除成本后）
   eod_check_time: "14:50"           # 尾盘平衡检查时间
 
 # ── 统一成本模型（cost_model.CostModel）──
 # P0-1 整改：成本计算统一收敛到 CostModel，支持三种场景
 cost:
-  commission_rate: 0.00025          # 佣金（万2.5，单边）
+  commission_rate: 0.0001           # 佣金（万1，单边）2026-07-24 调降：万2.5→万1
   stamp_tax_rate: 0.0005            # 印花税（0.05%，卖出单边）
   slippage_rate: 0.001              # 滑点（0.1%，单边）
   impact_rate: 0.0000               # 冲击成本（小单忽略）
@@ -84,12 +84,16 @@ screener:
 # ── 回测参数（backtest_t_strategy.BacktestParams）──
 # P0 整改：成本字段保留兼容，实际成本计算委托给 CostModel（见 cost 段）
 backtest:
-  commission_rate: 0.00025          # 佣金费率（万2.5）— 兼容字段，实际用 cost 段
+  commission_rate: 0.0001           # 佣金费率（万1）— 兼容字段，实际用 cost 段
   stamp_tax_rate: 0.0005            # 印花税（0.05%，卖出单边）— 兼容字段
   slippage: 0.001                   # 滑点（0.1%）— 兼容字段
   cooldown_bars: 3                  # 信号触发后N根K线内不再触发同方向信号
   require_opposite_direction: true  # 有未配对腿时只允许反方向信号
   max_holding_bars: 12              # P0-2: 单笔最大持仓K线数
+  # ── 止损/止盈结构（2026-07-24 修复"小赚多次大亏几次"：原硬编码在 backtest.py）──
+  stop_loss_ratio: 0.008            # 固定止损 0.8%（原1.5%：avg_loss=156元≈刚好1.5%全额止损，收紧使亏损与盈利同量级）
+  trailing_ratio: 0.5               # 移动止盈回撤比例（从最高点回吐50%触发）
+  trailing_activation_pct: 0.005    # 移动止盈激活门槛：浮盈≥0.5%才启用（原有1tick盈利即激活→微利被扫出，avg_win仅0.3%）
 
 # ── P1: 测量层配置（主计划 S2.6 / S3）──
 measurement:

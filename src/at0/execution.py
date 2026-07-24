@@ -280,21 +280,30 @@ class TradeLifecycle:
         bar: dict,
         stop_loss_ratio: float = 0.015,
         trailing_ratio: float = 0.5,
+        trailing_activation_pct: float = 0.0,
     ) -> list[TradeLeg]:
         """
         检查移动止损（移动止盈 + 固定止损兜底）。
 
-        1. 有过盈利（max_favorable > 0）：从最高点回撤 trailing_ratio(0.5) 触发移动止盈，
-           保住至少一半利润。盘中穿透即触发（bar.low/high），成交价 = 止损线。
-        2. 从未盈利：固定止损 max_adverse >= fill_price × stop_loss_ratio(1.5%) 防大亏。
+        1. 浮盈达到激活门槛（max_favorable >= fill_price × trailing_activation_pct）：
+           从最高点回撤 trailing_ratio(0.5) 触发移动止盈，保住部分利润。
+           盘中穿透即触发（bar.low/high），成交价 = 止损线。
+        2. 未激活移动止盈：固定止损 max_adverse >= fill_price × stop_loss_ratio 防大亏。
 
         v4实验（分离止盈止损，trailing=0）失败：平仓信号在5min不可靠触发，
         盈利腿变超时/止损，胜率从82%暴跌到36%。故恢复移动止盈。
 
+        2026-07-24 修复"小赚多次大亏几次"：原逻辑 max_favorable > 0（1 tick 盈利）
+        即激活移动止盈 → 微利立即被扫出（avg_win≈0.3%），而亏损腿跑满固定止损
+        1.5%（avg_loss≈1.5%），payoff_ratio 仅 0.21。新增 trailing_activation_pct
+        激活门槛：浮盈不足门槛时不启用移动止盈，让盈利腿发展；同时建议收紧
+        stop_loss_ratio 使亏损与盈利同量级。activation_pct=0 时保持旧行为。
+
         :param bar_idx: 当前 K 线索引
         :param bar: 当前 K 线（需含 low/high）
-        :param stop_loss_ratio: 固定止损比例（默认 1.5%，仅 max_favorable==0 时生效）
+        :param stop_loss_ratio: 固定止损比例（默认 1.5%，移动止盈未激活时生效）
         :param trailing_ratio: 移动止盈回撤比例（默认 0.5，从最高点回撤50%触发）
+        :param trailing_activation_pct: 移动止盈激活门槛（浮盈比例，0=有盈利即激活，兼容旧行为）
         :return: 本次止损的腿列表
         """
         if stop_loss_ratio <= 0 and trailing_ratio <= 0:
@@ -308,7 +317,15 @@ class TradeLifecycle:
             should_stop = False
             stop_fill = 0.0
 
-            if leg.max_favorable > 0 and trailing_ratio > 0:
+            # 移动止盈激活判断：浮盈须达到 fill_price × trailing_activation_pct
+            # activation_pct=0 时退化为旧行为（有任意盈利即激活）
+            trailing_armed = (
+                trailing_ratio > 0
+                and leg.max_favorable > 0
+                and leg.max_favorable >= abs(leg.fill_price) * trailing_activation_pct
+            )
+
+            if trailing_armed:
                 # 移动止损：从最大有利偏移回撤超过 trailing_ratio
                 retained = leg.max_favorable * (1 - trailing_ratio)
                 if leg.direction == "buy":
@@ -322,9 +339,9 @@ class TradeLifecycle:
                         should_stop = True
                         stop_fill = stop_line
             else:
-                # 固定止损：从未盈利时防大亏
+                # 固定止损：移动止盈未激活时防大亏
                 threshold = abs(leg.fill_price) * stop_loss_ratio
-                if leg.max_adverse >= threshold:
+                if stop_loss_ratio > 0 and leg.max_adverse >= threshold:
                     should_stop = True
                     if leg.direction == "buy":
                         stop_fill = leg.fill_price - threshold
