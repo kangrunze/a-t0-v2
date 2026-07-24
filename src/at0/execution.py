@@ -1,4 +1,4 @@
-﻿"""
+"""
 execution 层合并模块
 ====================
 本模块合并自 scripts/trade_lifecycle.py 与 scripts/position_tracker.py，
@@ -596,6 +596,65 @@ def get_net_position_delta(code: str, path: Path = POSITIONS_FILE) -> int:
     if not pos:
         return 0
     return int(pos.get("today_t_state", {}).get("net_position_delta", 0))
+
+
+# ═══════════════════════════════════════════════════════════════
+# 实盘 open_legs 持久化（止损监控状态）
+# ═══════════════════════════════════════════════════════════════
+# 独立于 positions.json，记录实盘未平仓 TradeLeg（含 fill_price /
+# max_favorable / max_adverse / holding_bars / open_vwap_dev），供
+# monitor 每轮加载、更新极值、调用 check_stop_loss / check_expiry。
+# 与回测 TradeLifecycle.export_open_legs / import_open_legs 格式一致。
+#
+# 背景：实盘 monitor 长期只有策略反转信号平仓，缺价格止损兜底
+# （check_stop_loss/check_expiry 仅在 backtest.py 调用）。
+# 此持久化层 + monitor 接入补齐实盘止损安全网。
+LIVE_OPEN_LEGS_FILE = PROJECT_ROOT / "data" / "live_open_legs.json"
+
+
+def load_live_open_legs_all(path: Path = LIVE_OPEN_LEGS_FILE) -> dict:
+    """加载全部实盘 open_legs。文件不存在或损坏返回 {}。"""
+    try:
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[WARN] load_live_open_legs failed: {e}", file=sys.stderr)
+    return {}
+
+
+def load_live_open_legs(code: str, path: Path = LIVE_OPEN_LEGS_FILE) -> list[dict]:
+    """加载某只股票的实盘 open_legs。无记录返回 []。"""
+    return load_live_open_legs_all(path).get(code, [])
+
+
+def _atomic_update_live_legs(mutate_fn, path: Path = LIVE_OPEN_LEGS_FILE) -> None:
+    """原子读-改-写 live_open_legs.json（独立锁，避免与 positions.json 锁竞争）。"""
+    with _file_lock(path.with_suffix(".json.lock")):
+        try:
+            if path.exists():
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            else:
+                data = {}
+        except (json.JSONDecodeError, OSError):
+            data = {}
+        mutate_fn(data)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(".json.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+
+
+def save_live_open_legs(code: str, legs: list[dict]) -> None:
+    """原子更新某只股票的 open_legs；legs 为空则移除该 code 记录。"""
+    def mutate(data):
+        if legs:
+            data[code] = legs
+        else:
+            data.pop(code, None)
+    _atomic_update_live_legs(mutate)
 
 
 # ═══════════════════════════════════════════════════════════════

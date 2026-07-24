@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 cli 入口层模块
 ================
@@ -76,10 +76,13 @@ from .risk import (
     is_theme_retreated,
     eod_balance_check_all,
 )
-from .execution import load_positions, get_position, get_sellable_shares
+from .execution import (
+    load_positions, get_position, get_sellable_shares,
+    TradeLifecycle, load_live_open_legs, save_live_open_legs,
+)
 from .features import compute_market_snapshot, MarketSnapshot, fetch_quote_features
 from .logging_utils import log_signal, log_trade, log_monitor
-from .config import load_signal_params, load_risk_params
+from .config import load_signal_params, load_risk_params, load_backtest_params
 
 
 # ═══ cli: run_backtest（单股回测入口） ═══
@@ -588,6 +591,7 @@ def monitor_single_stock(
     signal_params: SignalParams = None,
     risk_params: RiskParams = None,
     cost_model=None,
+    backtest_params: BacktestParams = None,
     source: str = "auto",
     trading_date: str = None,
 ) -> dict:
@@ -608,6 +612,7 @@ def monitor_single_stock(
     signal_params = signal_params or SignalParams()
     risk_params = risk_params or RiskParams()
     cost_model = cost_model or CostModel.base()
+    backtest_params = backtest_params or BacktestParams()
     today = datetime.now().strftime("%Y-%m-%d")
     trading_date = trading_date or today
     is_realtime = trading_date == today
@@ -704,6 +709,70 @@ def monitor_single_stock(
         "rules": reduce_sig.rules_fired if recommendation == "reduce" else add_sig.rules_fired,
     }
 
+    # === 实盘止损层（独立于策略信号的价格兜底，与回测 check_stop_loss 对齐）===
+    # research_only 下仍监控 open_legs 极值并产出止损/超时平仓提醒，
+    # 弥补"实盘平仓仅靠趋势反转信号、无价格兜底"的缺口。
+    # 顺序与回测一致：update_holding → check_stop_loss → check_expiry → 信号开仓。
+    # 仅当存在未平仓 open_legs 时执行（无仓位跳过，避免无谓 IO）。
+    saved_legs = load_live_open_legs(code)
+    if saved_legs:
+        lifecycle = TradeLifecycle(max_holding_bars=backtest_params.max_holding_bars)
+        lifecycle.import_open_legs(saved_legs)
+        _bar_idx = len(bars) - 1
+        _last_bar = bars[-1]
+        _cur_price = quote.get("price") or _last_bar.get("close", 0.0)
+        # 更新已有 open_legs 极值（方案C2：用盘中 low/high）
+        lifecycle.update_holding(_bar_idx, _cur_price, _last_bar.get("low"), _last_bar.get("high"))
+
+        stopped_legs = lifecycle.check_stop_loss(
+            _bar_idx, _last_bar,
+            stop_loss_ratio=backtest_params.stop_loss_ratio,
+            trailing_ratio=backtest_params.trailing_ratio,
+            trailing_activation_pct=backtest_params.trailing_activation_pct,
+        )
+        expired_legs = lifecycle.check_expiry(_bar_idx)
+
+        # 持久化剩余 open_legs（极值已更新；止损/超时腿已移出 open_legs）
+        save_live_open_legs(code, lifecycle.export_open_legs())
+
+        if stopped_legs or expired_legs:
+            stop_msgs = []
+            for stp in stopped_legs:
+                close_dir = "sell" if stp.direction == "buy" else "buy"
+                stop_msgs.append(
+                    f"止损平仓 {close_dir} {stp.shares}股 @ {stp.stop_fill_price:.2f}"
+                    f" (开仓{stp.fill_price:.2f} max_fav={stp.max_favorable:.4f}"
+                    f" max_adv={stp.max_adverse:.4f} hold={stp.holding_bars}bars)"
+                )
+            for exp in expired_legs:
+                close_dir = "sell" if exp.direction == "buy" else "buy"
+                stop_msgs.append(
+                    f"超时平仓 {close_dir} {exp.shares}股 @ {_cur_price:.2f}"
+                    f" (开仓{exp.fill_price:.2f} hold={exp.holding_bars}bars)"
+                )
+            result["action"] = "stop_loss"
+            result["reason"] = "; ".join(stop_msgs)
+            result["stop_loss"] = {
+                "stopped": [stp.to_dict() for stp in stopped_legs],
+                "expired": [exp.to_dict() for exp in expired_legs],
+                "price": _cur_price,
+            }
+            log_trade(
+                code=code,
+                t_type="止损/超时平仓",
+                direction="sell",
+                shares=sum(l.shares for l in list(stopped_legs) + list(expired_legs)),
+                price=_cur_price,
+                reference_price=_cur_price,
+                rules_fired=[],
+                rules_score=0,
+                risk_approved=True,
+                risk_checks={},
+                bar_time=_last_bar.get("time", ""),
+                notes="; ".join(stop_msgs),
+            )
+            return result  # 止损优先，本轮不开新仓
+
     # 无信号
     if recommendation == "none" or recommendation == "conflict":
         result["reason"] = f"recommendation={recommendation}"
@@ -757,6 +826,25 @@ def monitor_single_stock(
     if not risk_result.approved:
         result["reason"] = f"风控拒绝: {risk_result.reason}"
         return result
+
+    # === 开仓录入 open_legs（用于后续止损监控）===
+    # research_only 下记录"虚拟开仓"：信号触发即视为开仓，使后续轮次能对该腿
+    # 做止损/超时监控。FIFO 配对由 TradeLifecycle.add_fill 处理（同回测）。
+    # 注意：用户未实际跟单时会产生"虚假开仓"，后续止损信号会标注 research_only。
+    add_lifecycle = TradeLifecycle(max_holding_bars=backtest_params.max_holding_bars)
+    existing_legs = load_live_open_legs(code)
+    if existing_legs:
+        add_lifecycle.import_open_legs(existing_legs)
+    add_lifecycle.add_fill(
+        direction=direction,
+        shares=risk_result.adjusted_shares,
+        fill_price=quote.get("price", 0.0),
+        fill_time=bars[-1].get("time", ""),
+        fill_date=trading_date,
+        fill_bar_idx=len(bars) - 1,
+        open_vwap_dev=eval_result["snapshot"].get("vwap_dev"),
+    )
+    save_live_open_legs(code, add_lifecycle.export_open_legs())
 
     # 信号通过风控 → 输出提醒（research_only，不执行交易）
     t_type = ""
@@ -832,6 +920,8 @@ def monitor_main(source: str = "auto", trading_date: str = None) -> int:
     # P0-4: 加载统一成本模型，避免风控预期价差检查与实际成交成本口径分裂
     from .config import load_cost_model
     cost_model = load_cost_model()
+    # 止损参数（0.8% 固定止损 + 0.5% 移动止盈激活门槛），供 monitor 止损层使用
+    backtest_params = load_backtest_params()
 
     # 市场层快照（跨股票共享，每轮计算一次，落盘 market_gate.json）
     # westock 为可选外部数据源：未配置 WESTOCK_DIR 时降级为独立模式
@@ -853,11 +943,11 @@ def monitor_main(source: str = "auto", trading_date: str = None) -> int:
         r = monitor_single_stock(
             code, pos, market=market,
             signal_params=signal_params, risk_params=risk_params,
-            cost_model=cost_model,
+            cost_model=cost_model, backtest_params=backtest_params,
             source=source, trading_date=trading_date,
         )
         results.append(r)
-        if r["action"] == "signal":
+        if r["action"] in ("signal", "stop_loss"):
             signal_count += 1
 
     # 输出
@@ -872,6 +962,12 @@ def monitor_main(source: str = "auto", trading_date: str = None) -> int:
     lines.append("")
 
     for r in results:
+        if r["action"] == "stop_loss":
+            lines.append(
+                f"- {r['code']} ({r['theme']})\n"
+                f"  [止损] {r['reason']}"
+            )
+            continue
         if r["action"] != "signal":
             continue
         sig = r["signal"]

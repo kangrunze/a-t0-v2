@@ -91,9 +91,14 @@ backtest:
   require_opposite_direction: true  # 有未配对腿时只允许反方向信号
   max_holding_bars: 12              # P0-2: 单笔最大持仓K线数
   # ── 止损/止盈结构（2026-07-24 修复"小赚多次大亏几次"：原硬编码在 backtest.py）──
-  stop_loss_ratio: 0.008            # 固定止损 0.8%（原1.5%：avg_loss=156元≈刚好1.5%全额止损，收紧使亏损与盈利同量级）
-  trailing_ratio: 0.5               # 移动止盈回撤比例（从最高点回吐50%触发）
-  trailing_activation_pct: 0.005    # 移动止盈激活门槛：浮盈≥0.5%才启用（原有1tick盈利即激活→微利被扫出，avg_win仅0.3%）
+  # 51股 train/test 分割验证（outputs/verify_stop_scheme.json + verify_grid2.json）：
+  #   旧(1.5%/act=0): PF=0.90/0.92, payoff=0.21, 期望为负
+  #   新(0.4%/act=0): train PF=1.294 exp=+5.21；test PF=1.510 exp=+14.39（外样本更优）
+  #   注意：提高激活门槛（act=0.5%）方案被否决——胜率 81%→42%，PF 崩到 0.46
+  #   （腿均 MFE 仅~0.26%，到不了 0.5% 激活线；有盈即锁是胜率来源，动的是止损端）
+  stop_loss_ratio: 0.004            # 固定止损 0.4%（原1.5%：avg_loss≈满额1.5%，收紧使亏损与~0.3%的盈利同量级）
+  trailing_ratio: 0.5               # 移动止盈回撤比例（从最高点回吐50%触发，保持不变）
+  trailing_activation_pct: 0.0      # 移动止盈激活门槛：0=有盈即锁（保持旧行为；经验证提高门槛会摧毁胜率）
 
 # ── P1: 测量层配置（主计划 S2.6 / S3）──
 measurement:
