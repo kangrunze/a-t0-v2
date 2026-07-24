@@ -109,4 +109,123 @@ def score_kdj(kdj_k: float, kdj_j: Optional[float] = None) -> float:
         return 90.0
     elif kdj_k >= 70:
         return 70.0
-    elif
+    elif kdj_k <= 20:
+        return 90.0
+    elif kdj_k <= 30:
+        return 70.0
+    elif 40 <= kdj_k <= 60:
+        return 30.0
+    else:
+        return 50.0
+
+
+def score_adx(adx: float) -> float:
+    """
+    ADX 趋势强度评分
+
+    主计划 S1.2 映射:
+      15->10, 20->30, 25->60, 35->90
+
+    趋势跟随: ADX 越高趋势越强, 评分越高
+    """
+    if adx < 15:
+        return 10.0
+    elif adx < 20:
+        return 30.0
+    elif adx < 25:
+        return 50.0
+    elif adx < 30:
+        return 70.0
+    elif adx < 35:
+        return 85.0
+    else:
+        return 100.0
+
+
+def score_volume(vol_ratio: float) -> float:
+    """
+    量比评分 (量能放大确认)
+
+    主计划 S1.2: vol_ratio normalized
+
+    趋势跟随: 量比越大, 量能放大越确认趋势
+    """
+    if vol_ratio < 0.8:
+        return 10.0
+    elif vol_ratio < 1.0:
+        return 30.0
+    elif vol_ratio < 1.5:
+        return 60.0
+    elif vol_ratio < 2.0:
+        return 80.0
+    else:
+        return 100.0
+
+
+def compute_alpha_score(snap: dict, params) -> tuple[float, dict]:
+    """
+    计算连续 Alpha 评分 (P2 实现).
+
+    主计划 S2.3:
+      AlphaScore = Sum(wi * scorei) / Sum(wi), clip [0, 100]
+
+    各子信号评分函数基于主计划 S1.2 映射公式.
+    权重 wi 从 params.alpha_weight_* 读取, 等权起步.
+
+    :param snap: 特征快照 (含 vwap_dev, rsi, kdj_k, adx, vol_ratio, atr 等)
+    :param params: SignalParams (含 alpha_weight_* 权重)
+    :return: (alpha_score 0-100, sub_scores dict)
+    """
+    sub_scores = {}
+
+    # 1. VWAP 偏离评分（None 安全：snap.get(k, default) 在值为 None 时仍返回 None）
+    vwap_dev = snap.get("vwap_dev")
+    vwap_dev = 0.0 if vwap_dev is None else vwap_dev
+    atr = snap.get("atr")
+    if atr is None:
+        atr = snap.get("atr_intraday")
+    atr = 0.0 if atr is None else atr
+    s_vwap = score_vwap(vwap_dev, atr)
+    sub_scores["vwap"] = s_vwap
+
+    # 2. RSI 评分
+    rsi = snap.get("rsi")
+    rsi = 50.0 if rsi is None else rsi
+    direction = snap.get("_direction", "reduce")
+    s_rsi = score_rsi(rsi, direction)
+    sub_scores["rsi"] = s_rsi
+
+    # 3. KDJ 评分
+    kdj_k = snap.get("kdj_k")
+    kdj_k = 50.0 if kdj_k is None else kdj_k
+    s_kdj = score_kdj(kdj_k)
+    sub_scores["kdj"] = s_kdj
+
+    # 4. ADX 评分
+    adx = snap.get("adx")
+    adx = 0.0 if adx is None else adx
+    s_adx = score_adx(adx)
+    sub_scores["adx"] = s_adx
+
+    # 5. 量能评分
+    vol_ratio = snap.get("vol_ratio")
+    vol_ratio = 1.0 if vol_ratio is None else vol_ratio
+    s_vol = score_volume(vol_ratio)
+    sub_scores["volume"] = s_vol
+
+    # 加权平均
+    weights = {
+        "vwap": params.alpha_weight_vwap,
+        "rsi": params.alpha_weight_rsi,
+        "kdj": params.alpha_weight_kdj,
+        "adx": params.alpha_weight_adx,
+        "volume": params.alpha_weight_volume,
+    }
+    total_weight = sum(weights.values())
+    if total_weight > 0:
+        alpha = sum(sub_scores[k] * weights[k] for k in weights) / total_weight
+    else:
+        alpha = 0.0
+
+    alpha = max(0.0, min(100.0, alpha))
+    return alpha, sub_scores
