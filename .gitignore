@@ -9,3 +9,4 @@ src/__pycache__/*.pyc
 tests/__pycache__/*.pyc
 src/outputs/runs/*
 data/multi_day_cache/*
+data/multi_day_cache/*
