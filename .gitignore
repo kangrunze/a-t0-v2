@@ -3,7 +3,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
-*.py.bak
 
 # Distribution / packaging
 .Python
@@ -23,9 +22,11 @@ wheels/
 .installed.cfg
 *.egg
 
-# outputs（回测产物，不入版本控制）
-outputs/
-src/outputs/
+# outputs
+outputs/*
+# !outputs/runs/
+# !outputs/runs/.gitkeep
+# outputs/backtest/*.json
 
 # data cache
 data/multi_day_cache/*
