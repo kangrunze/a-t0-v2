@@ -301,11 +301,11 @@ overlay (paper/research) ─┘
 
 | 参数 | 值 | 说明 |
 |---|---|---|
-| `stop_loss_ratio` | 0.008 | 固定止损 0.8%（移动止盈未激活时兜底） |
+| `stop_loss_ratio` | 0.004 | 固定止损 0.4%（51股train/test验证：test PF 1.294→1.510，比旧值0.008显著更优） |
 | `trailing_ratio` | 0.5 | 移动止盈回撤 50% |
-| `trailing_activation_pct` | 0.005 | 浮盈≥0.5% 才激活移动止盈 |
+| `trailing_activation_pct` | 0.0 | 移动止盈激活门槛（0=1tick盈利即激活；提高到0.5%的方案已被否决，胜率81%→42%崩溃） |
 | `max_holding_bars` | 12 | 超时平仓（12根5min=1h） |
-| `cooldown_bars` | 3 | 信号冷却（注：注释提到v5降为12，yaml仍为3） |
+| `cooldown_bars` | 3 | 信号冷却（3根K线） |
 
 #### 成本模型（[thresholds.yaml cost 段](file:///d:/project/a-t0-v2/config/thresholds.yaml)）
 
@@ -362,7 +362,7 @@ overlay (paper/research) ─┘
   盘中穿透(bar.low/high) → 成交价 = stop_line
 
 未激活时（浮盈不足0.5%）：
-  threshold = fill_price × stop_loss_ratio(0.8%)
+  threshold = fill_price × stop_loss_ratio(0.4%)
   max_adverse >= threshold → 固定止损，成交价 = fill_price ± threshold
 ```
 

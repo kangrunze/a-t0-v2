@@ -12,7 +12,7 @@
 data:
   root: D:\project\data
 
-# ── 决策层信号参数（t_signal_engine.SignalParams）──
+# ── 决策层信号参数（at0.strategy.SignalParams）──
 signal:
   vwap_dev_atr_multiplier: 0.8      # VWAP 偏离度阈值 = ±0.8 × ATR_intraday（相对值）
   bb_period: 20                     # 布林带周期
@@ -36,6 +36,14 @@ signal:
   active_sell_pressure: 0.55        # 主动卖占比 > 此值视为卖压
   active_buy_pressure: 0.55         # 主动买占比 > 此值视为买盘
   min_rules_to_trigger: 3           # 4 项中至少 3 项满足
+  open_max_vwap_dev: 0.012          # 开仓深度上限（1.2%）：偏离过深禁止开仓，避免在趋势行情中被当逆势
+  # ── 趋势跟随参数（2026-07-24 策略转向，当前主力逻辑）──
+  # 数据诊断：5min VWAP偏离后65%概率延续，29%概率回归，转为顺趋势方向开仓
+  tf_adx_threshold: 35.0            # ADX > 此值确认趋势存在（v5降频：30→35）
+  tf_vol_ratio_min: 2.0             # 量比 > 此值确认量能放大（v5降频：1.5→2.0）
+  tf_trend_reverse_adx: 28.0        # ADX<此值视为趋势减弱（平仓条件）
+  tf_vwap_cross_threshold: 0.002    # |VWAP偏离| < 此值视为VWAP穿越（平仓条件，0.2%）
+  tf_kdj_reverse_bars: 2            # KDJ连续N根反向确认（平仓条件，防单根噪声）
   # ── P2: Alpha 连续评分开关（主计划 S2.3，默认关闭）──
   use_continuous_alpha: false        # flag=false 时行为与改造前逐笔一致
   alpha_weight_vwap: 1.0             # Alpha 评分权重（等权起步）
@@ -45,7 +53,7 @@ signal:
   alpha_weight_volume: 1.0
   alpha_threshold_open: 60.0         # 连续评分模式开仓门槛
 
-# ── 风控参数（t_risk_guard.RiskParams）──
+# ── 风控参数（at0.risk.RiskParams）──
 # P0-1 整改：round_trip_cost 从 0.1% 修正为真实 0.3%（佣金×2+印花税+滑点×2）
 # max_t_size_ratio 从 0.5 收紧至 0.25（方案 v1.0 Section 5 Phase 1 研究起点）
 risk:
@@ -65,7 +73,7 @@ cost:
   impact_rate: 0.0000               # 冲击成本（小单忽略）
   scenario: base                    # optimistic / base / pessimistic
 
-# ── 敞口策略（exposure_policy.ExposurePolicy）──
+# ── 敞口策略（at0.risk.ExposurePolicy）──
 # P0-3 整改：尾盘时段限制与交易生命周期
 exposure_policy:
   max_open_legs_per_direction: 1    # 每方向最多未配对腿数
@@ -87,8 +95,12 @@ screener:
   min_20d_amplitude: 0.035          # 20日平均振幅 ≥ 3.5%
   min_20d_amount: 1.0e8             # 20日日均成交额 ≥ 1亿元
   min_capture_spread: 0.006         # 单笔预期捕获空间 ≥ 0.6%
+  # Stage D 步骤3: 60日日均振幅下限（样本外验证 Youden 阈值=0.0494）
+  # null=关闭（默认），开启时建议 0.0494（4.94%）
+  # 依据: 步骤1 p=0.0001/delta=+0.446/AUC=0.723，步骤2 样本外 6/6 全通过
+  min_amplitude_long: null
 
-# ── 回测参数（backtest_t_strategy.BacktestParams）──
+# ── 回测参数（at0.backtest.BacktestParams）──
 # P0 整改：成本字段保留兼容，实际成本计算委托给 CostModel（见 cost 段）
 backtest:
   commission_rate: 0.0001           # 佣金费率（万1）— 兼容字段，实际用 cost 段

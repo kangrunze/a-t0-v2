@@ -7,7 +7,7 @@ backtest 层的统一入口。原始脚本暂保留在 scripts/ 不动，本文�
 
 包含四个职责区（engine + walk_forward + metrics + artifacts）：
   - metrics:      统计口径 + 汇总（原 backtest_metrics.py）
-  - engine:       回测引擎主循环（原 backtest_t_strategy.py）
+  - engine:       回测引擎主循环（原 scripts/backtest_t_strategy.py 等（已合并到本模块））
   - artifacts:    run_id 版本化 + 数据指纹（原 run_artifacts.py）
   - walk_forward: 网格搜索 + 滚动样本外验证（原 tune_params.py）
 
@@ -281,17 +281,19 @@ def save_backtest_report(result: dict, output_path: Path) -> None:
         json.dump(result, f, ensure_ascii=False, indent=2, default=str)
 
 
-# ═══ backtest: backtest_t_strategy（回测引擎主循环） ═══
+# ═══ backtest: 回测引擎主循环 ═══
 
 
 # ═══════════════════════════════════════════════════════════════
 # 路径配置
 # ═══════════════════════════════════════════════════════════════
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-# 数据路径统一从 at0.paths 获取（支持 AT0_DATA_DIR 环境变量覆盖）
+# 项目根与数据路径统一从 at0.paths 获取（支持 AT0_DATA_DIR 环境变量覆盖）。
+# 注意：paths.py 的 PROJECT_ROOT 是 3 层 parent（src/at0/paths.py → src/at0/ → src/ → 项目根），
+# 不要在本文件重新定义（本文件在 src/at0/ 下，2 层 parent 只到 src/，会导致 artifacts 落到 src/outputs/）。
 try:
-    from .paths import MINUTE_BARS_DIR as MINUTE_DATA_DIR
+    from .paths import PROJECT_ROOT, MINUTE_BARS_DIR as MINUTE_DATA_DIR
 except (ImportError, ValueError):
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
     MINUTE_DATA_DIR = PROJECT_ROOT / "data" / "minute_bars"
 BACKTEST_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "backtest"
 
@@ -301,12 +303,16 @@ BACKTEST_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "backtest"
 # ═══════════════════════════════════════════════════════════════
 @dataclass
 class BacktestParams:
-    """回测参数。"""
-    # 成本（P0-1: 统一收敛到 CostModel，旧字段保留兼容）
-    commission_rate: float = 0.0001         # 佣金万1（单边，2026-07-24 调降）
+    """回测参数。
+
+    注意：以下默认值仅为 fallback，权威值和调优历史见 config/thresholds.yaml。
+    实盘/回测入口应通过 at0.config.load_backtest_params() 加载 yaml 值。
+    """
+    # 成本（统一收敛到 CostModel，旧字段保留兼容）
+    commission_rate: float = 0.0001         # 佣金万1（单边）
     stamp_tax_rate: float = 0.0005          # 印花税 0.05%（卖单）
     slippage: float = 0.001                 # 滑点 0.1%
-    cost_model: Optional[CostModel] = None  # P0-1: 统一成本模型（None时用旧字段构造）
+    cost_model: Optional[CostModel] = None  # 统一成本模型（None时用旧字段构造）
 
     # 持仓
     base_shares: int = 3000                 # 底仓股数
@@ -321,24 +327,23 @@ class BacktestParams:
     eod_check_bar_idx: int = 200            # 14:50 对应的K线索引（约第200根）
 
     # 信号约束（防止同方向连发、强制配对闭环）
-    cooldown_bars: int = 12                 # 信号触发后N根K线内不再触发同方向信号（v5降频：6→12，5min×12=1h，目标交易数8316→2000）
+    cooldown_bars: int = 12                 # 信号触发后N根K线内不再触发同方向信号
     require_opposite_direction: bool = True  # 有未配对腿时只允许反方向信号
 
-    # P0-2: 交易生命周期
+    # 交易生命周期
     max_holding_bars: int = 12              # 单笔最大持仓K线数，超过标记expired
 
-    # 止损/止盈结构（2026-07-24 修复"小赚多次大亏几次"，原硬编码 0.015/0.5）
-    stop_loss_ratio: float = 0.008          # 固定止损比例（原1.5%→0.8%：使单笔亏损与平均盈利同量级）
+    # 止损/止盈结构
+    stop_loss_ratio: float = 0.008          # 固定止损比例
     trailing_ratio: float = 0.5             # 移动止盈回撤比例（从最高点回吐50%触发）
-    trailing_activation_pct: float = 0.005  # 移动止盈激活门槛（浮盈≥0.5%才启用；0=旧行为，1tick盈利即激活）
+    trailing_activation_pct: float = 0.005  # 移动止盈激活门槛（0=旧行为，1tick盈利即激活）
 
-    # P0-3: 敞口策略
+    # 敞口策略
     exposure_policy: Optional[ExposurePolicy] = None  # None时用默认策略
 
-    # P0-7: 硬趋势门控（反T买入需 trend_ctx ∈ {trend_up, range}；trend_down/extreme 否决）
-    # 用户改进项：MA60向上才允许反T买入，这里用 ADX-based regime 替代（趋势向下时否决买入）
+    # 硬趋势门控（反T买入需 trend_context ∈ {trend_up, range}；trend_down/extreme 否决）
     hard_trend_filter_add: bool = False
-    # P0-7: 硬趋势门控（正T卖出需 trend_ctx ∈ {trend_down, range}；trend_up/extreme 否决）
+    # 硬趋势门控（正T卖出需 trend_context ∈ {trend_down, range}；trend_up/extreme 否决）
     hard_trend_filter_reduce: bool = False
 
     def get_cost_model(self) -> CostModel:
@@ -666,12 +671,12 @@ def backtest_single_day(
 
         # P0-7: 硬趋势门控（基于 trend_context，非配对腿才过滤；配对腿不受影响）
         if params.hard_trend_filter_add and add_ok and not has_sell_open:
-            tctx_a = add_sig.trend_context or "range"
-            if tctx_a in ("trend_down", "extreme"):
+            trend_ctx_add = add_sig.trend_context or "range"
+            if trend_ctx_add in ("trend_down", "extreme"):
                 add_ok = False
         if params.hard_trend_filter_reduce and reduce_ok and not has_buy_open:
-            tctx_r = reduce_sig.trend_context or "range"
-            if tctx_r in ("trend_up", "extreme"):
+            trend_ctx_reduce = reduce_sig.trend_context or "range"
+            if trend_ctx_reduce in ("trend_up", "extreme"):
                 reduce_ok = False
 
         # P2: Alpha 连续评分分支（主计划 S2.3）
@@ -848,6 +853,7 @@ def backtest_multi_day(
     params: Optional[BacktestParams] = None,
     l1_risk_dates: set[str] | None = None,
     retreated_dates: set[str] | None = None,
+    regime_filter_enabled: bool = False,
 ) -> dict:
     """
     对单只股票多个交易日进行回测。
@@ -856,6 +862,14 @@ def backtest_multi_day(
     日内状态（locked_shares/t_trades_today/last_signal_bar）仍每日重置
     （T+1 解锁的是 locked_shares，与 open_legs 无关）。
     回测结束时对仍未配对的 open_legs 按最后收盘价计算浮盈浮亏。
+
+    Stage E: regime_filter_enabled=True 时，逐日算日线 regime（日线ADX+MA20），
+    NO_TRADE 状态下跳过当天的 backtest_single_day 调用（物理上不进入信号评估）。
+    TRENDING/RANGING 的差异化处理留到 Stage F+，本阶段都放行。
+
+    @deprecated Stage E 验证未通过（见 src/at0/regime.py 废弃说明），
+    regime_filter_enabled 参数保留兼容但不应再设为 True。
+    新增筛选应走 screener.py 的 min_amplitude_long（60日日均振幅过滤）。
 
     返回:
     {
@@ -871,11 +885,22 @@ def backtest_multi_day(
         "win_rate": float,                # 基于已配对交易
         "avg_trades_per_day": float,
         "daily_results": list[dict],
+        "filtered_days": list[str],       # Stage E: 被 regime NO_TRADE 拦掉的日期
     }
     """
     params = params or BacktestParams()
     l1_risk_dates = l1_risk_dates or set()
     retreated_dates = retreated_dates or set()
+
+    # Stage E: 预计算每日 regime（严格因果：用截至昨日的日K）
+    regimes_by_date: dict[str, str] = {}
+    filtered_days: list[str] = []
+    if regime_filter_enabled:
+        from .regime import synthesize_daily_klines, precompute_regimes_for_dates
+        daily_klines = synthesize_daily_klines(daily_bars)
+        target_dates = sorted(daily_bars.keys())
+        regimes = precompute_regimes_for_dates(daily_klines, target_dates)
+        regimes_by_date = {d: r.value for d, r in regimes.items()}
 
     daily_results = []
     total_trades = 0
@@ -892,6 +917,11 @@ def backtest_multi_day(
         bars = daily_bars[date_str]
         prev_close = daily_prev_closes.get(date_str, 0)
         if prev_close <= 0 or len(bars) < params.warmup_bars:
+            continue
+
+        # Stage E: NO_TRADE 硬门控（物理跳过信号评估）
+        if regime_filter_enabled and regimes_by_date.get(date_str) == "NO_TRADE":
+            filtered_days.append(date_str)
             continue
 
         result = backtest_single_day(
@@ -944,6 +974,7 @@ def backtest_multi_day(
         "win_rate": win_rate,
         "avg_trades_per_day": total_trades / len(daily_results) if daily_results else 0,
         "daily_results": daily_results,
+        "filtered_days": filtered_days,  # Stage E: 被 NO_TRADE 拦掉的日期
     }
 
 
@@ -998,7 +1029,6 @@ if __name__ == "__main__":
 # ═══ backtest: run_artifacts（run_id 版本化 + 数据指纹） ═══
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RUNS_DIR = PROJECT_ROOT / "outputs" / "runs"
 
 
@@ -1129,7 +1159,6 @@ def save_run_artifacts(
 # ═══════════════════════════════════════════════════════════════
 # 调优配置
 # ═══════════════════════════════════════════════════════════════
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = PROJECT_ROOT / "outputs" / "backtest"
 
 # 参数搜索空间

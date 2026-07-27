@@ -1066,8 +1066,8 @@ if __name__ == "__main__":
 
 # 候选文件路径（按优先级尝试）：
 # 1. data/themes_v17.json — market_layer 原来猜测的路径
-# 2. outputs/theme_hypothesis_{今日}.json — t_risk_guard 原来猜测的路径
-# 3. outputs/theme_hypothesis_latest.json — t_risk_guard 的 fallback
+# 2. outputs/theme_hypothesis_{今日}.json — risk 原来猜测的路径
+# 3. outputs/theme_hypothesis_latest.json — risk 的 fallback
 # 4. 环境变量 L2_THEMES_FILE 指定的路径（允许外部覆盖）
 _L2_CANDIDATE_FILES: list[Path] = []
 

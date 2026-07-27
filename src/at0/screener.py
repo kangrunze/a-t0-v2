@@ -29,6 +29,11 @@ class ScreenerParams:
     min_20d_amplitude: float = 0.035       # 20日平均振幅 ≥ 3.5%
     min_20d_amount: float = 1.0e8          # 20日日均成交额 ≥ 1亿元
     min_capture_spread: float = 0.006      # 单笔预期捕获空间 ≥ 0.6%
+    # Stage D 步骤3: 60日日均振幅下限（样本外验证 Youden 阈值=0.0494）
+    # 默认 None=关闭，开启时建议设为 0.0494（4.94%）
+    # 依据: 步骤1 Mann-Whitney U p=0.0001, Cliff's delta=+0.446(中效应), AUC=0.723
+    #       步骤2 样本外 6/6 全通过（50只新股票，高振幅组盈利占比66.7% vs 低振幅组28.1%）
+    min_amplitude_long: Optional[float] = None
 
 
 DEFAULT_SCREENER_PARAMS = ScreenerParams()
@@ -41,6 +46,7 @@ class ScreenResult:
     eligible: bool
     reasons: list[str]
     avg_amplitude_20d: Optional[float] = None
+    avg_amplitude_long: Optional[float] = None  # 60日日均振幅（Stage D 步骤3）
     avg_amount_20d: Optional[float] = None
     is_one_word_board: Optional[bool] = None
     expected_capture: Optional[float] = None
@@ -57,20 +63,26 @@ def screen_candidate(code: str, params: Optional[ScreenerParams] = None) -> Scre
     result = ScreenResult(code=code, eligible=False, reasons=[])
 
     # ── 检查 1+2: 20日振幅 + 日均成交额（从日 K 线获取）──
-    kline_data = run_westock(f"kline {symbol} --period daily --count 20")
+    # Stage D 步骤3: 若开启 min_amplitude_long，需取 60 日数据
+    kline_count = 60 if params.min_amplitude_long is not None else 20
+    kline_data = run_westock(f"kline {symbol} --period daily --count {kline_count}")
     if isinstance(kline_data, list) and len(kline_data) >= 20:
-        amplitudes = []
+        all_bars = kline_data[-kline_count:] if len(kline_data) >= kline_count else kline_data
+        amplitudes_20d = []
+        amplitudes_long = []
         amounts = []
-        for bar in kline_data[-20:]:
+        for bar in all_bars:
             high = float(bar.get("high", 0))
             low = float(bar.get("low", 0))
             prev_close = float(bar.get("prev_close", 0))
             amount = float(bar.get("amount", 0))
             if prev_close > 0:
-                amplitudes.append((high - low) / prev_close)
+                amplitudes_long.append((high - low) / prev_close)
             amounts.append(amount)
-        if amplitudes:
-            result.avg_amplitude_20d = sum(amplitudes) / len(amplitudes)
+        # 20日窗口 = 最近20根
+        amplitudes_20d = amplitudes_long[-20:]
+        if amplitudes_20d:
+            result.avg_amplitude_20d = sum(amplitudes_20d) / len(amplitudes_20d)
             if result.avg_amplitude_20d >= params.min_20d_amplitude:
                 result.reasons.append(f"20日均振幅 {result.avg_amplitude_20d*100:.2f}% ≥ {params.min_20d_amplitude*100:.1f}% ✓")
             else:
@@ -81,6 +93,13 @@ def screen_candidate(code: str, params: Optional[ScreenerParams] = None) -> Scre
                 result.reasons.append(f"20日均额 {result.avg_amount_20d/1e8:.2f}亿 ≥ 1亿 ✓")
             else:
                 result.reasons.append(f"20日均额 {result.avg_amount_20d/1e8:.2f}亿 < 1亿 ✗")
+        # Stage D 步骤3: 60日振幅检查（仅当 min_amplitude_long 非 None）
+        if params.min_amplitude_long is not None and amplitudes_long:
+            result.avg_amplitude_long = sum(amplitudes_long) / len(amplitudes_long)
+            if result.avg_amplitude_long >= params.min_amplitude_long:
+                result.reasons.append(f"60日均振幅 {result.avg_amplitude_long*100:.2f}% ≥ {params.min_amplitude_long*100:.2f}% ✓")
+            else:
+                result.reasons.append(f"60日均振幅 {result.avg_amplitude_long*100:.2f}% < {params.min_amplitude_long*100:.2f}% ✗")
     else:
         result.reasons.append("日K线数据不足，跳过振幅/成交额检查 ⚠")
 

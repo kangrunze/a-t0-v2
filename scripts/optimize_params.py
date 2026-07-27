@@ -8,6 +8,11 @@
 目标函数：
   score = net_pnl + 0.5*(win_rate-0.5)*scale - 0.3*max_drawdown
   （净盈亏为主，胜率>50%奖励、<50%惩罚，回撤惩罚）
+
+@deprecated 本脚本用 SignalParams(**sp_fields) 直接构造参数，未走
+config/thresholds.yaml，基准参数与 yaml 不一致会导致寻优结果不可比。
+新代码请使用 scripts/optimize_zz500_params.py（已通过 load_signal_params()
+统一走 yaml）。保留本脚本仅为历史参考，不应在新流程中调用。
 """
 from __future__ import annotations
 

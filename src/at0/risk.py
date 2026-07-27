@@ -11,9 +11,9 @@ risk 层合并模块
 合并自以下源文件（原 scripts/ 下文件保持不变）：
   - scripts/cost_model.py
   - scripts/exposure_policy.py
-  - scripts/t_risk_guard.py
+  - scripts/risk.py
 
-其中 t_risk_guard.py 原先依赖的 position_tracker 已合并入 .execution，
+其中 risk.py 原先依赖的 position_tracker 已合并入 .execution，
 故本地依赖改为相对导入；l2_theme_reader 维持原导入方式。
 """
 from __future__ import annotations
@@ -47,7 +47,7 @@ from .data import get_theme_state
 """
 统一成本模型（P0-1 整改）
 ========================
-将散落在 backtest_t_strategy.py 中的佣金、印花税、滑点、冲击成本
+将散落在 backtest.py 中的佣金、印花税、滑点、冲击成本
 统一收敛到此处，确保回测、纸面监控和参数搜索使用同一个成本实现。
 
 核心规则：
@@ -164,7 +164,7 @@ class CostModel:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 兼容函数：供 backtest_t_strategy.py 旧接口调用
+# 兼容函数：供 backtest.py 旧接口调用
 # ═══════════════════════════════════════════════════════════════
 _DEFAULT_MODEL = CostModel.base()
 
@@ -194,7 +194,7 @@ def apply_slippage(
 """
 敞口策略与尾盘风控（P0-3 整改）
 ================================
-将 t_risk_guard.py 中"只标记状态不执行"的尾盘检查改为
+将 risk.py 中"只标记状态不执行"的尾盘检查改为
 真正的风险处置：强制了结超时敞口、限制尾盘新建仓。
 
 核心规则：
@@ -492,7 +492,7 @@ def eod_risk_disposal(
     return events
 
 
-# ═══ risk: t_risk_guard（pre_trade 检查 + L1/L2 熔断联动） ═══
+# ═══ risk: risk（pre_trade 检查 + L1/L2 熔断联动） ═══
 """
 L5 T+0 风控守卫
 =================

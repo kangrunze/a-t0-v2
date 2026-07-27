@@ -56,6 +56,8 @@ from at0.backtest import BacktestParams, backtest_multi_day, summarize_one_stock
 from at0.data import normalize_code
 from at0.strategy import SignalParams
 from at0.risk import RiskParams
+# P0 配置整改：默认从 thresholds.yaml 加载参数（消除 dataclass 默认值 drift）
+from at0.config import load_signal_params, load_risk_params, load_backtest_params
 
 # 直接导入本地数据加载器
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
@@ -110,7 +112,11 @@ def pick_sample_by_board(data_dir: Path, total: int = 30, seed: int = 42) -> lis
 # 根据参数组合构造 BacktestParams
 # ═══════════════════════════════════════════════════════════════
 def build_params(combo: dict, base_shares: int = 3000) -> BacktestParams:
-    """根据 combo 构造 BacktestParams，应用用户改进方向。"""
+    """根据 combo 构造 BacktestParams，应用用户改进方向。
+
+    P0 配置整改：默认从 thresholds.yaml 加载参数（消除 dataclass 默认值 drift）。
+    combo 中的字段作为显式实验覆盖，叠加在 yaml 默认值之上。
+    """
     sp_fields = {}
     bp_fields = {}
     rp_fields = {}
@@ -128,10 +134,10 @@ def build_params(combo: dict, base_shares: int = 3000) -> BacktestParams:
     if "hard_trend_filter_add" in combo:
         bp_fields["hard_trend_filter_add"] = combo["hard_trend_filter_add"]
 
-    sp = replace(SignalParams(), **sp_fields) if sp_fields else SignalParams()
-    rp = replace(RiskParams(), **rp_fields) if rp_fields else RiskParams()
+    sp = replace(load_signal_params(), **sp_fields) if sp_fields else load_signal_params()
+    rp = replace(load_risk_params(), **rp_fields) if rp_fields else load_risk_params()
     bp = replace(
-        BacktestParams(),
+        load_backtest_params(),
         base_shares=base_shares,
         signal_params=sp,
         risk_params=rp,

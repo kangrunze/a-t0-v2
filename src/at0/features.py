@@ -702,6 +702,10 @@ def _consecutive_shrink_no_new_low(bars: list[dict], lookback: int = 3) -> bool:
 # ═══════════════════════════════════════════════════════════════
 # 市场状态识别（P0-6: regime 归入 features 层）
 # ═══════════════════════════════════════════════════════════════
+# @deprecated 分钟级 regime 识别。strategy.py 的 _judge_trend_context 调用此函数，
+# 但趋势跟随转向后 trend_context 仅作信息记录，不参与决策。
+# 日线级 regime 识别见 at0.regime.classify_daily_regime（Stage E 新增）。
+# 新增代码不应依赖此函数做决策。
 def detect_market_regime(
     snap: dict,
     adx_trend_threshold: float = 25.0,
@@ -823,7 +827,7 @@ if __name__ == "__main__":
 # 个股盘口特征层（Stock Quote Features）
 # ======================================
 # 从 westock quote 拉取现成的盘口/资金字段（无需自己算），与 intraday_reference
-# 的特征计算层快照合并，供决策层（t_signal_engine）使用。
+# 的特征计算层快照合并，供决策层（strategy）使用。
 #
 # westock quote 已返回的字段（实测 sh600000）:
 #   - avg_price         = VWAP（现成，可交叉校验自算累计 VWAP）

@@ -38,7 +38,7 @@ L5 T+0 信号引擎（P0-5 三层决策结构）
       环境层: 项4 板块未退潮+未跌停 + 趋势过滤(extreme否决/trend_down加严)
 
 独立性：只依赖 features 层的纯计算函数，不依赖 L1/L2/L3/L4。
-L1/L2 熔断联动由调用方（t_risk_guard）负责，本引擎只产出原始信号。
+L1/L2 熔断联动由调用方（risk）负责，本引擎只产出原始信号。
 """
 
 from __future__ import annotations
@@ -248,6 +248,8 @@ def _price_trend_confirmed(bars: list[dict], direction: str, lookback: int) -> b
 # ═══════════════════════════════════════════════════════════════
 # 平仓动态阈值计算（方案C1修正版）
 # ═══════════════════════════════════════════════════════════════
+# @deprecated 此函数为均值回归时代的平仓阈值计算，趋势跟随转向后全项目无调用。
+# 保留以备未来回归策略复用，新增代码不应依赖此函数。
 def _compute_pairing_threshold(
     open_vwap_dev: Optional[float],
     params: SignalParams,
@@ -371,9 +373,10 @@ def evaluate_reduce_signal(
     趋势过滤（_judge_trend_context）保留但仅作信息记录，不再用于逆势加严
     （趋势跟随本身即顺趋势，无需对逆势开仓加严）。
 
-    open_vwap_dev: 开仓时刻的 vwap_dev（由调用方从 TradeLeg 传入）。
+    open_vwap_dev: @deprecated 开仓时刻的 vwap_dev（由调用方从 TradeLeg 传入）。
                   趋势跟随不再使用动态平仓阈值（_compute_pairing_threshold），
-                  保留参数以兼容函数签名。
+                  保留参数以兼容函数签名，函数体内不读取此值。
+                  新增代码不应依赖此参数。
     """
     params = params or DEFAULT_PARAMS
     snap = compute_reference_snapshot(bars, current_price, prev_close)
@@ -393,7 +396,7 @@ def evaluate_reduce_signal(
     vol_ratio = snap.get("volume_ratio")
 
     # 趋势过滤：仅作信息记录，趋势跟随不据此加严或否决
-    trend_ctx = _judge_trend_context(snap, params, frequency)
+    trend_context = _judge_trend_context(snap, params, frequency)
 
     # 格式化辅助（防 None）
     vwap_dev_str = f"{vwap_dev*100:+.2f}%" if vwap_dev is not None else "N/A"
@@ -435,7 +438,7 @@ def evaluate_reduce_signal(
             layer_scores={"pairing_distance": 1 if near_vwap else 0,
                           "pairing_direction": 1 if dir_confirmed else 0,
                           "filter": 1 if filter_passed else 0},
-            trend_context=trend_ctx,
+            trend_context=trend_context,
             trigger_threshold=2,  # 平仓分支走自己的触发逻辑，不走 trigger_threshold
             extreme_score=0,
             confirm_score=0,
@@ -475,7 +478,7 @@ def evaluate_reduce_signal(
         fired.append("[环境5] 涨停封板（硬否决）")
 
     # 趋势上下文（信息记录，不调整阈值）
-    fired.append(f"[趋势] {trend_ctx}（信息记录，趋势跟随不调整阈值）")
+    fired.append(f"[趋势] {trend_context}（信息记录，趋势跟随不调整阈值）")
 
     # 计分：总分 = 极值 + 确认 + 过滤
     total_score = extreme_score + confirm_score + (1 if filter_passed else 0)
@@ -492,7 +495,7 @@ def evaluate_reduce_signal(
         price=price,
         snapshot=snap,
         layer_scores={"extreme": extreme_score, "confirm": confirm_score, "filter": 1 if filter_passed else 0},
-        trend_context=trend_ctx,
+        trend_context=trend_context,
         trigger_threshold=trigger_threshold,
         extreme_score=extreme_score,
         confirm_score=confirm_score,
@@ -533,9 +536,10 @@ def evaluate_add_signal(
 
     趋势过滤（_judge_trend_context）保留但仅作信息记录，不再用于逆势加严。
 
-    open_vwap_dev: 开仓时刻的 vwap_dev（由调用方从 TradeLeg 传入）。
+    open_vwap_dev: @deprecated 开仓时刻的 vwap_dev（由调用方从 TradeLeg 传入）。
                   趋势跟随不再使用动态平仓阈值（_compute_pairing_threshold），
-                  保留参数以兼容函数签名。
+                  保留参数以兼容函数签名，函数体内不读取此值。
+                  新增代码不应依赖此参数。
     """
     params = params or DEFAULT_PARAMS
     snap = compute_reference_snapshot(bars, current_price, prev_close)
@@ -555,7 +559,7 @@ def evaluate_add_signal(
     vol_ratio = snap.get("volume_ratio")
 
     # 趋势过滤：仅作信息记录，趋势跟随不据此加严或否决
-    trend_ctx = _judge_trend_context(snap, params, frequency)
+    trend_context = _judge_trend_context(snap, params, frequency)
 
     # 格式化辅助（防 None）
     vwap_dev_str = f"{vwap_dev*100:+.2f}%" if vwap_dev is not None else "N/A"
@@ -602,7 +606,7 @@ def evaluate_add_signal(
             layer_scores={"pairing_distance": 1 if near_vwap else 0,
                           "pairing_direction": 1 if dir_confirmed else 0,
                           "filter": 1 if filter_passed else 0},
-            trend_context=trend_ctx,
+            trend_context=trend_context,
             trigger_threshold=2,  # 平仓分支走自己的触发逻辑，不走 trigger_threshold
             extreme_score=0,
             confirm_score=0,
@@ -647,7 +651,7 @@ def evaluate_add_signal(
         fired.append(f"[环境5] {'+'.join(reason)}（硬否决）")
 
     # 趋势上下文（信息记录，不调整阈值）
-    fired.append(f"[趋势] {trend_ctx}（信息记录，趋势跟随不调整阈值）")
+    fired.append(f"[趋势] {trend_context}（信息记录，趋势跟随不调整阈值）")
 
     # 计分：总分 = 极值 + 确认 + 过滤
     total_score = extreme_score + confirm_score + (1 if filter_passed else 0)
@@ -664,7 +668,7 @@ def evaluate_add_signal(
         price=price,
         snapshot=snap,
         layer_scores={"extreme": extreme_score, "confirm": confirm_score, "filter": 1 if filter_passed else 0},
-        trend_context=trend_ctx,
+        trend_context=trend_context,
         trigger_threshold=trigger_threshold,
         extreme_score=extreme_score,
         confirm_score=confirm_score,
@@ -754,7 +758,7 @@ def evaluate_all_signals(
         add_weight = adjust_signal_weight(market, "add")
         # P0-7 整改（2026-07-24）：基于"已加严的 trigger_threshold"叠加市场权重，
         # 而非从 base（params.min_rules_to_trigger）重算。
-        # 旧实现用 base 重算会覆盖 evaluate_reduce/add_signal 内部按 trend_ctx
+        # 旧实现用 base 重算会覆盖 evaluate_reduce/add_signal 内部按 trend_context
         # 已经 +1 的趋势加严结果（见 strategy.py:418-419 / 604-606），
         # 导致"上升趋势 + COLD 市场"双重作用下趋势保护丢失。
         reduce_sig.trigger_threshold = _apply_weight_to_threshold(

@@ -39,7 +39,7 @@ from typing import Iterator
 #
 # 原始模块文档（scripts/trade_lifecycle.py）：
 #   交易生命周期管理（P0-2 整改）
-#   将 backtest_t_strategy.py 中隐式的 open_legs 列表改为明确的交易生命周期：
+#   将 backtest.py 中隐式的 open_legs 列表改为明确的交易生命周期：
 #     candidate -> filled -> open -> paired / stopped / expired
 #   核心职责：
 #     - FIFO 配对结算（跨日连续，不按日重置）
@@ -687,7 +687,7 @@ def apply_t_trade(
                       → net_position_delta += shares
                       → t_trades_today += 1（反T 算一次完整 T；正T 买回也算一次）
 
-    注意：调用方必须先通过 t_risk_guard 校验，本函数不做风控。
+    注意：调用方必须先通过 risk 校验，本函数不做风控。
     P0-3: 使用 _atomic_update 保证读-改-写原子性，防止并发覆盖。
     """
     if direction not in {"buy", "sell"}:

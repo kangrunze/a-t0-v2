@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 批量回测脚本
 ============
@@ -11,6 +11,11 @@
 
 支持 --limit 限制股票数量（小范围验证用）。
 数据缓存自动启用（fetch_multi_day use_cache=True），二次运行直接读缓存。
+
+@deprecated 本脚本直接用 SignalParams()/RiskParams() dataclass 默认值构造参数，
+未走 config/thresholds.yaml，存在参数漂移风险。新代码请使用
+scripts/backtest_zz500.py（已通过 load_signal_params() 等统一走 yaml）。
+保留本脚本仅为历史参考，不应在新流程中调用。
 """
 import sys
 import json
