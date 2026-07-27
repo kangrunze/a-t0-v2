@@ -1,12 +1,45 @@
-﻿outputs/backtest/600026_2026-06-22_2026-07-22_report.json
-outputs/*
-!outputs/runs/
-!outputs/runs/.gitkeep
-outputs/backtest/*.json
-scripts/__pycache__/*.pyc
-src/at0/__pycache__/*.pyc
-src/__pycache__/*.pyc
-tests/__pycache__/*.pyc
-src/outputs/runs/*
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# outputs（回测产物，不入版本控制）
+outputs/
+src/outputs/
+
+# data cache
 data/multi_day_cache/*
-data/multi_day_cache/*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 例外保留：measurement/dualrun 的 .pyc 是 TSD 加密后的唯一可用实现，
+# 必须纳入版本控制（源码 .py 已加密为 .py.bak，标准 Python 无法加载）。
+# 详见 src/at0/measurement/__init__.py 和 src/at0/dualrun/__init__.py
+!src/at0/measurement/__pycache__/
+src/at0/measurement/__pycache__/*
+!src/at0/measurement/__pycache__/*.cpython-310.pyc
+!src/at0/dualrun/__pycache__/
+src/at0/dualrun/__pycache__/*
+!src/at0/dualrun/__pycache__/*.cpython-310.pyc
