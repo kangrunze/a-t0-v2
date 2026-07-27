@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-批量下载分钟级K线数据到本地指定目录（供 backtest_from_local.py 离线回测）。
+批量下载分钟级K线数据到本地指定目录（供 backtest_zz500.py --data-dir 离线回测）。
 
 存储约定
 ========
@@ -308,7 +308,7 @@ def enumerate_dates(start: str, end: str) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="批量下载分钟级K线到本地（供 backtest_from_local.py 离线回测）",
+        description="批量下载分钟级K线到本地（供 backtest_zz500.py --data-dir 离线回测）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

@@ -90,7 +90,7 @@ normalize_code = _load_at0_data()
 # 延迟导入回测依赖（at0.backtest / at0.cli / at0.strategy / at0.risk / at0.reports）
 # ═══════════════════════════════════════════════════════════════
 def _import_backtest_deps():
-    """延迟导入回测所需的所有 at0 子模块（与 backtest_from_local 一致）。"""
+    """延迟导入回测所需的所有 at0 子模块。"""
     from at0.backtest import (
         BacktestParams,
         backtest_multi_day,
@@ -110,6 +110,12 @@ def _import_backtest_deps():
         save_trades_json,
         save_report_json,
         BACKTEST_OUTPUT_DIR,
+    )
+    # P0 配置整改：统一从 thresholds.yaml 加载默认参数（消除 dataclass 默认值 drift）
+    from at0.config import (
+        load_signal_params,
+        load_risk_params,
+        load_backtest_params,
     )
     from dataclasses import asdict
     return {
@@ -131,6 +137,9 @@ def _import_backtest_deps():
         "save_report_json": save_report_json,
         "BACKTEST_OUTPUT_DIR": BACKTEST_OUTPUT_DIR,
         "asdict": asdict,
+        "load_signal_params": load_signal_params,
+        "load_risk_params": load_risk_params,
+        "load_backtest_params": load_backtest_params,
     }
 
 
@@ -261,6 +270,9 @@ def run_zz500_single(
     save_report_json = dep["save_report_json"]
     BACKTEST_OUTPUT_DIR = dep["BACKTEST_OUTPUT_DIR"]
     asdict = dep["asdict"]
+    load_signal_params = dep["load_signal_params"]
+    load_risk_params = dep["load_risk_params"]
+    load_backtest_params = dep["load_backtest_params"]
 
     daily_bars, daily_prev_closes, daily_meta = load_multi_day_zz500(
         code, start_date, end_date, data_dir,
@@ -279,7 +291,9 @@ def run_zz500_single(
         avg_cost = daily_prev_closes[first_date]
         print(f"[run_zz500] avg_cost 未指定，取首日 prev_close={avg_cost:.4f}")
 
-    # 应用参数覆盖（来自寻优结果）
+    # P0 配置整改：默认从 thresholds.yaml 加载参数（消除 dataclass 默认值 drift）。
+    # params_override 仅用于显式实验覆盖，叠加在 yaml 默认值之上。
+    from dataclasses import replace as _replace
     sp_kwargs = {}
     rp_kwargs = {}
     bp_kwargs = {}
@@ -288,9 +302,10 @@ def run_zz500_single(
         rp_kwargs = dict(params_override.get("rp", {}))
         bp_kwargs = dict(params_override.get("bp", {}))
 
-    sp = SignalParams(**sp_kwargs)
-    rp = RiskParams(**rp_kwargs)
-    params = BacktestParams(
+    sp = _replace(load_signal_params(), **sp_kwargs) if sp_kwargs else load_signal_params()
+    rp = _replace(load_risk_params(), **rp_kwargs) if rp_kwargs else load_risk_params()
+    params = _replace(
+        load_backtest_params(),
         base_shares=base_shares,
         avg_cost=avg_cost,
         signal_params=sp,
@@ -301,11 +316,9 @@ def run_zz500_single(
     params = adapt_params_by_frequency(params, frequency, bars_per_day)
     # 适配后再应用 bp override（避免被 adapt 覆盖 max_holding_bars 等）
     if bp_kwargs:
-        from dataclasses import replace as _replace
         params = _replace(params, **bp_kwargs)
         # 同步 exposure_policy 的 max_holding_bars（approve_signal 用它判 expired）
         if params.exposure_policy is not None and "max_holding_bars" in bp_kwargs:
-            from dataclasses import replace as _replace
             params.exposure_policy.max_holding_bars = bp_kwargs["max_holding_bars"]
     print(f"[run_zz500] warmup_bars={params.warmup_bars}, "
           f"eod_check_bar_idx={params.eod_check_bar_idx}, "
