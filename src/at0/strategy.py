@@ -138,6 +138,16 @@ class SignalParams:
     min_capture_spread_for_pairing: float = 0.006   # 平仓动态阈值的成本锚点（0.6%，与 RiskParams.min_capture_spread 对齐）
     pairing_max_regression_ratio: float = 0.5       # 动态阈值上限比例（开仓深度的50%）
 
+    # ── J2: 回踩入场参数（独立开关，默认关闭）──
+    # 设计目标：在已确认的上涨趋势中，等价格回踩到VWAP附近再买入，
+    # 而不是在趋势确认那一刻就追高入场。从而让买入点更贴近当日相对低点。
+    retracement_entry_enabled: bool = False   # 独立开关，默认关闭
+    retracement_min_adx: float = 25.0         # ADX需超过此值确认趋势存在
+    retracement_vwap_band: float = 0.005      # |VWAP偏离| ≤ 此值视为"回踩到VWAP"（0.5%）
+    retracement_lookback: int = 8             # 回看N根K线检查是否有过冲高
+    retracement_min_surge: float = 0.005      # 回看期间最高价相对VWAP的最小偏离（0.5%）
+    retracement_kdj_max: float = 60.0         # KDJ.K需低于此值（回踩时K回落，非追高）
+
 
 DEFAULT_PARAMS = SignalParams()
 
@@ -618,6 +628,36 @@ def evaluate_add_signal(
             pairing_direction_confirmed=dir_confirmed,
         )
 
+    # ═══ J2: 回踩入场（分离模式：趋势确认 + 入场价格确定 分离）═══
+    # 设计（v2，2026-07-28）：真正分离"趋势确认"和"入场价格确定"
+    #   - 趋势确认（历史）：过去N根K线有过冲高（recent_high > VWAP × (1+min_surge)）
+    #     说明趋势存在过，不需要当前K线再次通过4规则投票
+    #   - 入场价格确定（当前）：价格回踩到VWAP附近（0 < vwap_dev <= band）
+    #     + KDJ.K回落（K < kdj_max，确认是回调而非追高）
+    #   - 两者都满足时直接触发买入信号，即使当前K线的4规则投票未通过
+    #   - 回踩条件不满足时，走原来的4规则投票逻辑（向后兼容）
+    #
+    # v1（已废弃）的问题：要求"当前K线同时满足趋势确认+回踩"，但趋势确认时
+    # 价格已跑远（vwap_dev大），回踩时趋势确认又已失效（ADX回落），两者很少
+    # 同时成立，导致配对数锐减63%、净盈亏下降85%。
+    if params.retracement_entry_enabled:
+        vwap_val = snap.get("vwap")
+
+        # 条件1（入场价格）：VWAP偏离在上限内（价格回踩到VWAP附近，不追高）
+        vwap_dev_ok = (vwap_dev is not None and 0 < vwap_dev <= params.retracement_vwap_band)
+        # 条件2（入场价格）：KDJ.K未超买（K已从高位回落）
+        kdj_ok = (k_val is not None and k_val < params.retracement_kdj_max)
+        # 条件3（趋势确认）：近期有过冲高（趋势存在过，不是横盘）
+        lookback = params.retracement_lookback
+        recent_bars = bars[-lookback:] if len(bars) >= lookback else bars
+        recent_high = max((b.get("high", 0) for b in recent_bars), default=0)
+        had_surge = (vwap_val is not None and vwap_val > 0
+                     and recent_high > vwap_val * (1 + params.retracement_min_surge))
+
+        retracement_ok = vwap_dev_ok and kdj_ok and had_surge
+    else:
+        retracement_ok = False  # 未启用时不走回踩分支
+
     # ── 极值层 项1: VWAP偏离为正（价格在VWAP上方，多头）──
     if vwap_dev is not None and vwap_dev > 0:
         fired.append(f"[极值1] VWAP偏离 {vwap_dev_str} > 0（价格在VWAP上方，多头）")
@@ -657,6 +697,33 @@ def evaluate_add_signal(
     total_score = extreme_score + confirm_score + (1 if filter_passed else 0)
     if not filter_passed:
         total_score = 0
+
+    # J2: 回踩入场（分离模式）
+    # - 回踩条件满足 + 环境层通过 → 直接触发（不需要4规则投票通过）
+    #   此时强制提升 extreme_score/confirm_score/total_score 到触发阈值
+    #   （否则 TSignal.triggered 会因 extreme_score < extreme_min 而否决）
+    # - 回踩条件不满足 → 走原来的4规则投票逻辑
+    if params.retracement_entry_enabled and filter_passed:
+        if retracement_ok:
+            # 回踩触发：强制提升所有分数到触发阈值
+            total_score = max(total_score, params.min_rules_to_trigger)
+            extreme_score = max(extreme_score, params.extreme_min)
+            confirm_score = max(confirm_score, params.confirm_min)
+            fired.append(f"[回踩入场-触发] vwap_dev={vwap_dev_str}"
+                        f" K={'%.1f' % k_val if k_val else 'N/A'}"
+                        f" 近{params.retracement_lookback}根高点偏离VWAP "
+                        f"{((recent_high/vwap_val-1)*100):.2f}%（≥{params.retracement_min_surge*100:.1f}%）"
+                        f" → 分离模式触发，不依赖当前4规则投票")
+        else:
+            # 回踩条件不满足，记录原因（走原逻辑）
+            reasons = []
+            if not vwap_dev_ok:
+                reasons.append(f"vwap_dev={vwap_dev_str}需在0~{params.retracement_vwap_band*100:.1f}%")
+            if not kdj_ok:
+                reasons.append(f"K={'%.1f' % k_val if k_val else 'N/A'}需<{params.retracement_kdj_max}")
+            if not had_surge:
+                reasons.append(f"近{params.retracement_lookback}根无冲高（需≥{params.retracement_min_surge*100:.1f}%）")
+            fired.append(f"[回踩入场-未触发] {', '.join(reasons)} → 走4规则投票")
 
     # 趋势跟随：不额外加严，trigger_threshold = min_rules_to_trigger
     trigger_threshold = params.min_rules_to_trigger

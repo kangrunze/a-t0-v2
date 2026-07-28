@@ -64,19 +64,40 @@ def cumulative_vwap(bars: list[dict]) -> Optional[float]:
     """
     截至最后一根 K 线的累计 VWAP。
 
-    VWAP = Σ(close_i × volume_i) / Σ(volume_i)
+    VWAP = Σ(typical_price_i × volume_i) / Σ(volume_i)
+    where typical_price = (high + low + close) / 3
+
+    J0 修复（2026-07-28）：旧实现用 amount/volume，但数据源（baostock）
+    的 amount 字段未随 OHLC 同步复权，导致历史数据的 VWAP 严重失真
+    （如 603119 在 2023 年的 VWAP 偏离 close 达 70%）。
+    改用 typical_price × volume 计算，不依赖 amount 字段。
 
     ⚠️ 严格因果：只用传入的 bars 列表，调用方负责只传"截至当前时刻"的数据。
     """
     if not bars:
         return None
-    total_amount = sum(b.get("amount", 0) for b in bars)
-    total_vol = sum(b.get("volume", 0) for b in bars)
+    total_pv = 0.0
+    total_vol = 0.0
+    for b in bars:
+        vol = b.get("volume", 0)
+        if vol <= 0:
+            continue
+        h = b.get("high", 0)
+        l = b.get("low", 0)
+        c = b.get("close", 0)
+        if h <= 0 and l <= 0 and c <= 0:
+            continue
+        # typical price = (H + L + C) / 3
+        tp = (h + l + c) / 3.0
+        if tp <= 0:
+            continue
+        total_pv += tp * vol
+        total_vol += vol
     if total_vol <= 0:
         # 退化为简单均价
         closes = [b.get("close", 0) for b in bars if b.get("close", 0) > 0]
         return sum(closes) / len(closes) if closes else None
-    return total_amount / total_vol
+    return total_pv / total_vol
 
 
 def vwap_deviation(price: float, vwap: Optional[float]) -> Optional[float]:
