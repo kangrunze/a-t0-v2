@@ -116,6 +116,7 @@ def _import_backtest_deps():
         load_signal_params,
         load_risk_params,
         load_backtest_params,
+        load_screener_params,
     )
     from dataclasses import asdict
     return {
@@ -140,6 +141,7 @@ def _import_backtest_deps():
         "load_signal_params": load_signal_params,
         "load_risk_params": load_risk_params,
         "load_backtest_params": load_backtest_params,
+        "load_screener_params": load_screener_params,
     }
 
 
@@ -573,6 +575,60 @@ def parse_codes(args, data_dir: Path) -> list[str]:
     raise ValueError("必须指定 --code / --codes / --all / --sample 之一")
 
 
+def filter_codes_by_amplitude(codes: list[str], data_dir: Path, start_date: str,
+                               end_date: str, threshold: float, window: int = 60) -> tuple[list[str], list[tuple[str, float]]]:
+    """
+    按 60 日日均振幅过滤股票池（模拟 screener.py min_amplitude_long 检查）。
+
+    振幅口径：(high - low) / prev_close（与 screener.py L80 一致）
+    窗口：回测期前 window 个交易日（本地数据从 start_date 开始，无更早数据）
+
+    返回 (passed_codes, filtered_codes_with_amp)
+    """
+    passed = []
+    filtered = []
+    for code in codes:
+        path = data_dir / f"{code}.json"
+        if not path.exists():
+            filtered.append((code, -1.0))  # 无数据，按筛掉处理
+            continue
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        daily_bars = d.get("daily_bars", {})
+        if not daily_bars:
+            filtered.append((code, -1.0))
+            continue
+
+        # 合成日K并取回测期前 window 日
+        sorted_dates = sorted(daily_bars.keys())
+        in_range_dates = [d for d in sorted_dates if start_date <= d <= end_date]
+        use_dates = in_range_dates[:window] if len(in_range_dates) >= window else in_range_dates
+
+        amps = []
+        prev_close = None
+        for date in use_dates:
+            bars = daily_bars[date]
+            if not bars:
+                continue
+            high = max(b["high"] for b in bars)
+            low = min(b["low"] for b in bars)
+            if prev_close and prev_close > 0:
+                amps.append((high - low) / prev_close)
+            prev_close = bars[-1]["close"]
+
+        if not amps:
+            filtered.append((code, -1.0))
+            continue
+
+        avg_amp = sum(amps) / len(amps)
+        if avg_amp >= threshold:
+            passed.append(code)
+        else:
+            filtered.append((code, avg_amp))
+
+    return passed, filtered
+
+
 # ═══════════════════════════════════════════════════════════════
 # CLI
 # ═══════════════════════════════════════════════════════════════
@@ -601,6 +657,8 @@ def main() -> int:
                         help="输出文件后缀 tag，默认 zz500")
     parser.add_argument("--params-json", default=None,
                         help='参数覆盖 JSON 文件路径，格式 {"bp":{...},"sp":{...},"rp":{...}}')
+    parser.add_argument("--no-amplitude-filter", action="store_true",
+                        help="禁用 60 日振幅筛选（screener.min_amplitude_long），即使 yaml 里已开启")
     args = parser.parse_args()
 
     params_override = None
@@ -628,6 +686,34 @@ def main() -> int:
     if not data_dir.exists():
         print(f"[ERROR] 数据目录不存在: {data_dir}", file=sys.stderr)
         return 2
+
+    # 60 日振幅筛选（screener.min_amplitude_long）
+    # 从 thresholds.yaml 读取，--no-amplitude-filter 可禁用
+    if not args.no_amplitude_filter:
+        dep = _import_backtest_deps()
+        load_screener_params = dep["load_screener_params"]
+        screener_params = load_screener_params()
+        amp_threshold = screener_params.min_amplitude_long
+        if amp_threshold is not None:
+            print(f"[main] 60日振幅筛选已开启: threshold={amp_threshold*100:.2f}%")
+            passed, filtered = filter_codes_by_amplitude(
+                codes, data_dir, args.start, args.end, amp_threshold
+            )
+            if filtered:
+                print(f"[main] 筛掉 {len(filtered)} 只 (振幅 < {amp_threshold*100:.2f}%):")
+                for code, amp in filtered:
+                    amp_str = f"{amp*100:.2f}%" if amp >= 0 else "无数据"
+                    print(f"  {code}  amp={amp_str}")
+            if not passed:
+                print(f"[ERROR] 振幅筛选后无股票通过（{len(codes)} 只全部被筛掉）", file=sys.stderr)
+                print(f"[ERROR] 如需绕过筛选，请加 --no-amplitude-filter", file=sys.stderr)
+                return 2
+            print(f"[main] 通过筛选 {len(passed)}/{len(codes)} 只，继续回测")
+            codes = passed
+        else:
+            print(f"[main] 60日振幅筛选未开启（screener.min_amplitude_long=null）")
+    else:
+        print(f"[main] 60日振幅筛选已禁用（--no-amplitude-filter）")
 
     if len(codes) == 1:
         run_zz500_single(

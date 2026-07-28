@@ -1,0 +1,17 @@
+# ═══════════════════════════════════════════════════════════════
+# 卖出确认延迟优化实验 overlay：仅覆盖 tf_kdj_reverse_bars 2 → 1
+# ═══════════════════════════════════════════════════════════════
+# 用途：验证"减少平仓方向确认延迟"能否改善卖出侧偏离度及整体盈亏
+# 实验约束（project_memory 护栏）：
+#   - 一次只改一个自由度：仅改 tf_kdj_reverse_bars，cooldown_bars / max_holding_bars /
+#     tf_adx_threshold / tf_vol_ratio_min / tf_trend_reverse_adx / tf_vwap_cross_threshold
+#     全部保持 thresholds.yaml 当前基线值不变
+#   - 代码验证：tf_kdj_reverse_bars 仅在 strategy.py L417/L581 的 is_for_pairing=True
+#     分支使用（平仓方向确认），不影响开仓信号
+# 使用方式：
+#   $env:AT0_OVERLAY = "kdj_rev1"
+#   python scripts/backtest_zz500.py --sample 100 --seed 42 --start 2023-07-25 --end 2026-07-22 --tag sample100_3y_kdj_rev1
+# 对照组：outputs/backtest/batch_summary_sample100_3y.json（tf_kdj_reverse_bars=2 基线）
+
+signal:
+  tf_kdj_reverse_bars: 1             # KDJ连续N根反向确认（2→1，少等一根bar，降低平仓延迟）

@@ -1,0 +1,14 @@
+# ═══════════════════════════════════════════════════════════════
+# 降频对比实验 overlay：仅覆盖 cooldown_bars 3 → 24
+# ═══════════════════════════════════════════════════════════════
+# 用途：与 thresholds.yaml 基线做 A/B 对比，验证"降频能否改善成本/毛利比"
+# 实验约束（project_memory 护栏）：
+#   - 一次只改一个自由度：仅改 cooldown_bars，stop_loss_ratio=0.004 / max_holding_bars=12 等全部不动
+#   - 不接入决策层：仅用于对比回测，验证通过前不写回 thresholds.yaml
+# 使用方式：
+#   $env:AT0_OVERLAY = "cooldown24"
+#   python scripts/backtest_zz500.py --sample 100 --seed 42 --start 2023-07-25 --end 2026-07-22 --tag sample100_3y_cooldown24
+# 对照组：outputs/backtest/batch_summary_sample100_3y.json（cooldown_bars=3 基线）
+
+backtest:
+  cooldown_bars: 24                  # 信号冷却 K 线数（3→24，5min×24=2h，降频到原来的1/8）

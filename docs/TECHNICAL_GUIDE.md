@@ -33,34 +33,44 @@
 ```
 a-t0-v2/
 ├── config/
-│   ├── thresholds.yaml          # 基础参数（信号/风控/成本/回测/市场）
-│   ├── overlays/
-│   │   ├── paper.yaml           # 模拟盘 overlay（悲观成本+保守仓位）
-│   │   └── research.yaml        # 研究阶段 overlay（base 成本）
-│   └── schemas/
-│       └── params_schema.json   # 参数 schema（校验用）
-├── data/
-│   ├── positions.json           # 持仓状态（底仓/T+1锁定/今日T状态）
-│   └── live_open_legs.json      # 实盘 open_legs 状态（止损监控用）
-├── outputs/
-│   ├── backtest/                # 回测产物（trades/report/html）
-│   ├── runs/                    # 版本化 artifacts（run_id 目录）
-│   └── baseline/                # 基线对比报告
-├── scripts/                     # 辅助脚本（候选池生成/基线测量等）
-└── src/
-    └── at0/
+│   ├── thresholds.yaml          # 集中配置（信号/风控/成本/筛选/回测/测量）
+│   ├── thresholds.yaml.bak      # 上一版本备份（gitignore）
+│   └── overlays/
+│       ├── paper.yaml           # 模拟盘 overlay（悲观成本+保守仓位）
+│       └── research.yaml        # 研究阶段 overlay（base 成本）
+├── docs/                        # 技术文档
+├── scripts/                     # 工具脚本（回测/优化/数据下载/筛选）
+├── src/
+│   └── at0/
         ├── cli.py               # 统一 CLI 入口
-        ├── strategy.py          # 信号引擎（4项规则投票）
-        ├── strategy_alpha.py    # P2 连续评分（5维加权）
+        ├── strategy.py          # 信号引擎（4项规则投票，趋势跟随）
+        ├── strategy_alpha.py    # P2 连续评分（5维加权，默认关闭）
         ├── features.py          # 指标计算层
         ├── risk.py              # 风控 + 成本模型 + 敞口策略
         ├── execution.py         # 交易生命周期 + 持仓追踪 + open_legs 持久化
         ├── backtest.py          # 回测引擎
+        ├── screener.py          # 候选筛选（振幅/成交额/一字板/捕获空间）
+        ├── regime.py            # regime 分类（@deprecated，Stage E 验证未通过）
         ├── config.py            # 参数加载器（yaml → dataclass）
+        ├── paths.py             # 路径常量（支持 AT0_DATA_DIR 环境变量）
         ├── data.py              # 数据源适配（mootdx/westock/baostock）
         ├── reports.py           # HTML 报告生成
-        ├── measurement/         # 测量层（IC分析/现金流审计/参数景观）
-        └── dualrun/             # 双跑对比（A/B 策略对照）
+        ├── logging_utils.py     # 日志工具
+        └── measurement/         # 测量层（.pyc 形式，TSD 加密源码）
+├── archive/                     # 已归档的阶段性诊断/实验脚本
+└── .gitignore
+```
+
+**数据目录**（不在代码仓库内，通过 `config/thresholds.yaml` 的 `data.root` 指定）：
+
+```
+D:\project\data\
+├── zz500_5min/          # 中证 500 成分股 5min K线（每只一个 JSON）
+├── minute_local/        # 分钟线（按股票分目录，每日一 JSON）
+├── multi_day_cache/     # 多日数据缓存
+├── positions.json       # 持仓状态（底仓/T+1锁定/今日T状态）
+├── live_open_legs.json  # 实盘 open_legs 状态（止损监控用）
+└── market_gate.json     # 市场层门控快照
 ```
 
 ---
@@ -293,7 +303,7 @@ overlay (paper/research) ─┘
 |---|---|---|
 | `max_t_size_ratio` | 0.25 | 单次T仓位 ≤ 底仓25% |
 | `max_t_trades_per_day` | 4 | 每日最大T次数 |
-| `min_capture_spread` | 0.0075 | 最小预期捕获 0.75% |
+| `min_capture_spread` | 0.0072 | 最小预期捕获 0.72% |
 | `min_net_expected_return` | 0.0045 | 最小净期望收益 0.45% |
 | `eod_check_time` | "14:50" | 尾盘平衡检查时间 |
 
@@ -307,13 +317,27 @@ overlay (paper/research) ─┘
 | `max_holding_bars` | 12 | 超时平仓（12根5min=1h） |
 | `cooldown_bars` | 3 | 信号冷却（3根K线） |
 
+#### 振幅筛选参数（[thresholds.yaml screener 段](file:///d:/project/a-t0-v2/config/thresholds.yaml)）
+
+| 参数 | 值 | 说明 |
+|---|---|---|
+| `min_20d_amplitude` | 0.035 | 20 日平均振幅 ≥ 3.5% |
+| `min_20d_amount` | 1.0e8 | 20 日日均成交额 ≥ 1 亿元 |
+| `min_capture_spread` | 0.006 | 单笔预期捕获空间 ≥ 0.6% |
+| `min_amplitude_long` | 0.0494 | 60 日日均振幅下限（Youden 最优阈值，样本外验证通过） |
+
+> `min_amplitude_long` 主依据：F5 500 股全池验证，27 只独立股票净盈亏 +128,622，4/4 标准全通过。
+> `scripts/backtest_zz500.py` 的 `--no-amplitude-filter` 可禁用此筛选（A/B 对比用）。
+
 #### 成本模型（[thresholds.yaml cost 段](file:///d:/project/a-t0-v2/config/thresholds.yaml)）
 
 | 场景 | 佣金 | 印花税 | 滑点 | 冲击 | 来回总成本 |
 |---|---|---|---|---|---|
-| optimistic | 万2.5 | 0.05% | 0.05% | 0 | 0.2% |
-| **base** | 万2.5 | 0.05% | 0.1% | 0 | **0.3%** |
-| pessimistic | 万2.5 | 0.05% | 0.2% | 0.05% | 0.55% |
+| optimistic | 万1 | 0.05% | 0.05% | 0 | 0.2% |
+| **base** | 万1 | 0.05% | 0.1% | 0 | **0.27%** |
+| pessimistic | 万1 | 0.05% | 0.2% | 0.05% | 0.5% |
+
+> 佣金 2026-07-24 调降：万2.5 → 万1
 
 #### 市场层门控（[thresholds.yaml market 段](file:///d:/project/a-t0-v2/config/thresholds.yaml)）
 
@@ -368,7 +392,7 @@ overlay (paper/research) ─┘
 
 ### 持久化文件格式
 
-[data/live_open_legs.json](file:///d:/project/a-t0-v2/data/live_open_legs.json)：
+`{data_root}/live_open_legs.json`（数据目录下，由 `paths.LIVE_OPEN_LEGS_FILE` 指定）：
 
 ```json
 {
