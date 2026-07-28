@@ -1,13 +1,22 @@
 """
 measurement 包加载器
 ====================
-Trae 沙箱加密了本包下的 .py 文件（%TSD-Header-###%）。
-.py 文件已移到 .py.bak，Python 无法从源码加载。
-但 __pycache__ 里的 .pyc 是完好的，可用 SourcelessFileLoader 加载。
+Trae 沙箱加密了本包下的 .py 源文件（%TSD-Header-###%），Python 无法从源码加载。
+__pycache__ 里的 .pyc 是完好的，可用 SourcelessFileLoader 加载。
 
 Python 3.10 的 dataclass 在用 SourcelessFileLoader 加载 .pyc 时，
 _is_type 解析字符串注解会失败（模块 __dict__ 时序问题），
 故先 monkey-patch dataclasses._is_type 容错。
+
+┌─ 决策记录（2026-07-28，Stage H 步骤3）──────────────────────────┐
+│ 原 .py 源文件曾被 TSD 加密为 .py.bak 占位，确认无法在标准环境运行。│
+│ 本包的诊断能力已由 archive/diag/diag_*.py 脚本体系替代并经实战验证，│
+│ 公共部分已沉淀为本包下的 loaders.py / rules_parser.py（纯 .py）。 │
+│ 决定放弃解密旧模块，删除全部 .py.bak 占位文件，不再维护。         │
+│ 子模块（time_split/trade_quality/cashflow_audit/ic_analysis/     │
+│ param_landscape/stratified）仍通过 __pycache__/*.pyc 提供运行时   │
+│ 支持，待后续 diag 脚本全部迁移到新模块后再清理 .pyc。            │
+└──────────────────────────────────────────────────────────────────┘
 """
 import dataclasses as _dc
 

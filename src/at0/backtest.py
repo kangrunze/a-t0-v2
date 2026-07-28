@@ -190,6 +190,12 @@ def summarize_one_stock(code: str, result: dict) -> dict:
     net_pnl = round(gross_pnl - total_cost, 2)
     # P3-2: net_pnl_with_unrealized 必须包含 expired 腿真实盈亏
     net_w_u = round(net_pnl + unrealized + expired_pnl, 2)
+    # Stage G0: avg_win/avg_loss/payoff_ratio（基于已配对交易毛盈亏）
+    win_pnls = [t.get("pnl", 0) for t in wins]
+    loss_pnls = [t.get("pnl", 0) for t in losses]
+    avg_win = round(sum(win_pnls) / len(wins), 2) if wins else 0.0
+    avg_loss = round(sum(loss_pnls) / len(losses), 2) if losses else 0.0
+    payoff_ratio = round(avg_win / abs(avg_loss), 4) if avg_loss != 0 else 0.0
     return {
         "code": code,
         "total_trades": len(trades),
@@ -198,6 +204,9 @@ def summarize_one_stock(code: str, result: dict) -> dict:
         "win_trades": len(wins),
         "loss_trades": len(losses),
         "win_rate": round(len(wins) / len(paired), 4) if paired else 0.0,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "payoff_ratio": payoff_ratio,
         "gross_pnl": round(gross_pnl, 2),
         "total_cost": round(total_cost, 2),
         "net_pnl": net_pnl,
@@ -223,6 +232,7 @@ def aggregate_batch(
     """
     total_paired = sum(s.get("paired_trades", 0) for s in per_stock)
     total_wins = sum(s.get("win_trades", 0) for s in per_stock)
+    total_losses = sum(s.get("loss_trades", 0) for s in per_stock)
     total_net = sum(s.get("net_pnl", 0) for s in per_stock)
     total_gross = sum(s.get("gross_pnl", 0) for s in per_stock)
     total_cost = sum(s.get("total_cost", 0) for s in per_stock)
@@ -231,6 +241,13 @@ def aggregate_batch(
     total_expired_pnl = sum(s.get("expired_legs_real_pnl", 0) for s in per_stock)
     total_final_legs = sum(s.get("final_open_legs_count", 0) for s in per_stock)
     overall_wr = (total_wins / total_paired) if total_paired else 0.0
+
+    # Stage G0: 整体 avg_win/avg_loss/payoff_ratio（按总毛盈亏/笔数聚合，非个股均值）
+    total_win_pnl = sum(s.get("avg_win", 0) * s.get("win_trades", 0) for s in per_stock)
+    total_loss_pnl = sum(s.get("avg_loss", 0) * s.get("loss_trades", 0) for s in per_stock)
+    avg_win = round(total_win_pnl / total_wins, 2) if total_wins else 0.0
+    avg_loss = round(total_loss_pnl / total_losses, 2) if total_losses else 0.0
+    payoff_ratio = round(avg_win / abs(avg_loss), 4) if avg_loss != 0 else 0.0
 
     profitable = [s for s in per_stock
                   if "error" not in s and s.get("net_pnl_with_unrealized", s.get("net_pnl", 0)) > 0]
@@ -242,7 +259,11 @@ def aggregate_batch(
         "total_trades": all_trades_count,
         "paired_trades": total_paired,
         "win_trades": total_wins,
+        "loss_trades": total_losses,
         "win_rate": round(overall_wr, 4),
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "payoff_ratio": payoff_ratio,
         "gross_pnl": round(total_gross, 2),
         "total_cost": round(total_cost, 2),
         "net_pnl": round(total_net, 2),
