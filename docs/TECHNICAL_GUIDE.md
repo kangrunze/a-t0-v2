@@ -295,7 +295,7 @@ overlay (paper/research) ─┘
 | `rsi_overbought` / `rsi_oversold` | 70 / 30 | RSI辅助确认 |
 | `mfi_overbought` / `mfi_oversold` | 80 / 20 | 资金面超买超卖 |
 | `vol_ratio_shrink_threshold` | 0.8 | 量比缩量阈值 |
-| `cooldown_bars` | 3 | 信号触发后冷却 K 线数 |
+| `cooldown_bars` | 24 | 信号触发后冷却 K 线数（24根5min=2h） |
 
 #### 风控参数（[thresholds.yaml risk 段](file:///d:/project/a-t0-v2/config/thresholds.yaml)）
 
@@ -311,11 +311,33 @@ overlay (paper/research) ─┘
 
 | 参数 | 值 | 说明 |
 |---|---|---|
-| `stop_loss_ratio` | 0.004 | 固定止损 0.4%（51股train/test验证：test PF 1.294→1.510，比旧值0.008显著更优） |
-| `trailing_ratio` | 0.5 | 移动止盈回撤 50% |
-| `trailing_activation_pct` | 0.0 | 移动止盈激活门槛（0=1tick盈利即激活；提高到0.5%的方案已被否决，胜率81%→42%崩溃） |
-| `max_holding_bars` | 12 | 超时平仓（12根5min=1h） |
-| `cooldown_bars` | 3 | 信号冷却（3根K线） |
+| `stop_loss_ratio` | 0.002 | 固定止损 0.2%（J0+新VWAP 36股×3年×8值网格最优，2026-07-29定案） |
+| `trailing_ratio` | 0.2 | 移动止盈回撤 20%（J0+新VWAP 36股×3年×6值网格最优） |
+| `trailing_activation_pct` | 0.0 | 移动止盈激活门槛（0=有盈即锁；提高门槛摧毁胜率） |
+| `max_holding_bars` | 24 | 超时平仓（24根5min=2h） |
+| `cooldown_bars` | 24 | 信号冷却（24根5min=2h） |
+
+#### J2 回踩入场参数（[thresholds.yaml signal 段](file:///d:/project/a-t0-v2/config/thresholds.yaml)，2026-07-29 正式启用）
+
+| 参数 | 值 | 说明 |
+|---|---|---|
+| `retracement_entry_enabled` | true | 买入侧分离模式（趋势确认+入场价格确定分离） |
+| `retracement_vwap_band` | 0.02 | VWAP 偏离 ≤ 2% 视为回踩到位 |
+| `retracement_kdj_max` | 70.0 | KDJ.K < 70 确认非追高 |
+| `retracement_lookback` | 8 | 回看 8 根 K 线检查历史冲高 |
+| `retracement_min_surge` | 0.005 | 历史冲高 ≥ 0.5% 确认趋势存在 |
+
+> **验证依据**（36股×3年×4组A/B）：J2启用后配对+88%、净盈亏+90%（623K→1,185K）、CE均值+39%（2.26%→3.14%）、胜率维持69%。
+
+#### J4 冲高确认参数（[thresholds.yaml signal 段](file:///d:/project/a-t0-v2/config/thresholds.yaml)，2026-07-29 验证后拒绝启用）
+
+| 参数 | 值 | 说明 |
+|---|---|---|
+| `surge_exit_enabled` | false | 卖出侧分离模式（结构性无效，保持关闭） |
+| `surge_vwap_band` | 0.005 | VWAP 偏离 ≤ 0.5% 视为冲高到位 |
+| `surge_kdj_min` | 40.0 | KDJ.K > 40 确认已反弹 |
+
+> **拒绝原因**：J4单独使CE均值从2.26%降至1.82%（与设计目标相反）。趋势跟随策略卖出逻辑是"卖在强势区"（接近日内高点），已接近CE最优；J4要求"先跌后反弹到VWAP再卖"，卖点结构性更低。
 
 #### 振幅筛选参数（[thresholds.yaml screener 段](file:///d:/project/a-t0-v2/config/thresholds.yaml)）
 
@@ -378,15 +400,15 @@ overlay (paper/research) ─┘
 移动止盈激活条件：
   trailing_ratio > 0
   AND max_favorable > 0
-  AND max_favorable >= fill_price × trailing_activation_pct(0.5%)
+  AND max_favorable >= fill_price × trailing_activation_pct(0.0=有盈即锁)
 
 激活后：
   retained = max_favorable × (1 - trailing_ratio)
-  stop_line = fill_price ± retained      # 从最高点回撤 50% 触发
+  stop_line = fill_price ± retained      # 从最高点回撤 20% 触发
   盘中穿透(bar.low/high) → 成交价 = stop_line
 
-未激活时（浮盈不足0.5%）：
-  threshold = fill_price × stop_loss_ratio(0.4%)
+未激活时（trailing_activation_pct=0 时始终激活）：
+  threshold = fill_price × stop_loss_ratio(0.2%)
   max_adverse >= threshold → 固定止损，成交价 = fill_price ± threshold
 ```
 
@@ -421,7 +443,7 @@ overlay (paper/research) ─┘
 ### 注意事项
 
 1. **research_only 语义**：开仓录入是"虚拟开仓"（信号触发即记录），用户未实际跟单会产生虚假 open_leg。如实盘执行层上线，需改为真实成交后录入。
-2. **跨日清理**：`live_open_legs.json` 不会自动按日清空。若某腿跨多日未配对也未超时，会持续监控（受 `max_holding_bars=12` 超时保护兜底）。如需按交易日清理，可在 `reset_today_state` 旁加清理钩子。
+2. **跨日清理**：`live_open_legs.json` 不会自动按日清空。若某腿跨多日未配对也未超时，会持续监控（受 `max_holding_bars=24` 超时保护兜底）。如需按交易日清理，可在 `reset_today_state` 旁加清理钩子。
 
 ---
 

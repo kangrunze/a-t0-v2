@@ -144,10 +144,35 @@ python -m at0.cli paper_monitor --source auto
 
 | 参数 | 值 | 说明 |
 |---|---|---|
-| `stop_loss_ratio` | 0.004 | 固定止损 0.4%（51 股 train/test 验证最优） |
-| `trailing_ratio` | 0.5 | 移动止盈回撤 50% |
+| `stop_loss_ratio` | 0.002 | 固定止损 0.2%（J0+新VWAP 36股×3年×8值网格最优，2026-07-29 定案） |
+| `trailing_ratio` | 0.2 | 移动止盈回撤 20%（J0+新VWAP 36股×3年×6值网格最优） |
 | `trailing_activation_pct` | 0.0 | 有盈即锁（提高门槛会摧毁胜率） |
-| `max_holding_bars` | 12 | 超时平仓（12 根 5min = 1h） |
+| `max_holding_bars` | 24 | 超时平仓（24 根 5min = 2h） |
+| `cooldown_bars` | 24 | 信号冷却（24 根 5min = 2h） |
+
+### J2 回踩入场参数（signal 段，2026-07-29 正式启用）
+
+| 参数 | 值 | 说明 |
+|---|---|---|
+| `retracement_entry_enabled` | true | 买入侧分离模式（趋势确认+入场价格确定分离） |
+| `retracement_vwap_band` | 0.02 | VWAP 偏离 ≤ 2% 视为回踩到位 |
+| `retracement_kdj_max` | 70.0 | KDJ.K < 70 确认非追高 |
+| `retracement_lookback` | 8 | 回看 8 根 K 线检查历史冲高 |
+| `retracement_min_surge` | 0.005 | 历史冲高 ≥ 0.5% 确认趋势存在 |
+
+> **验证依据**（36股×3年×4组A/B）：J2 启用后配对+88%、净盈亏+90%（623K→1,185K）、CE均值+39%（2.26%→3.14%）、胜率维持69%。机制：回踩到VWAP附近买入，买入点更贴近日内相对低点。
+
+### J4 冲高确认参数（signal 段，2026-07-29 验证后拒绝启用）
+
+| 参数 | 值 | 说明 |
+|---|---|---|
+| `surge_exit_enabled` | false | 卖出侧分离模式（结构性无效，保持关闭） |
+| `surge_vwap_band` | 0.005 | VWAP 偏离 ≤ 0.5% 视为冲高到位 |
+| `surge_kdj_min` | 40.0 | KDJ.K > 40 确认已反弹 |
+| `surge_lookback` | 8 | 回看 8 根 K 线检查历史深跌 |
+| `surge_min_drop` | 0.005 | 历史深跌 ≥ 0.5% 确认趋势存在 |
+
+> **拒绝原因**：J4设计目标是通过"等价格冲高到VWAP再卖出"提升卖出点CE。但36股×3年×4组A/B + 20股×5参数敏感性检查证明：J4单独使CE均值从2.26%降至1.82%（与目标相反）。根因：趋势跟随策略的卖出逻辑是"卖在强势区"（接近日内高点），已接近CE最优；J4要求"先跌后反弹到VWAP再卖"，VWAP在下跌日位于日内中低位→卖点结构性更低。参数从松到紧，J4要么加量降质（CE降），要么退化为baseline（无效）。
 
 ### 成本模型（cost 段）
 

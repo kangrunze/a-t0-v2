@@ -72,7 +72,12 @@ def load_zz500_data(code: str, start: str, end: str):
     return daily_bars, daily_prev_closes
 
 
-def calc_60d_amplitude(code: str, start_date: str, lookback: int = 60):
+def calc_60d_amplitude(code: str, start_date: str, end_date: str = None, lookback: int = 60):
+    """计算60日日均振幅。
+
+    J0+修复：用回测窗口内前60天数据（与 backtest_zz500.py 一致），
+    而非回测开始日之前的60天（本地数据从start_date开始，没有更早数据）。
+    """
     filepath = ZZ500_5MIN_DIR / f"{code}.json"
     if not filepath.exists():
         return None
@@ -80,10 +85,15 @@ def calc_60d_amplitude(code: str, start_date: str, lookback: int = 60):
         data = json.load(f)
     daily_bars_raw = data.get("daily_bars", {})
     sorted_dates = sorted(daily_bars_raw.keys())
+    # J0+修复：用回测窗口内的日期
+    if end_date:
+        in_range = [d for d in sorted_dates if start_date <= d <= end_date]
+    else:
+        in_range = [d for d in sorted_dates if d >= start_date]
+    use_dates = in_range[:lookback]
     amplitudes = []
-    for date in sorted_dates:
-        if date >= start_date:
-            break
+    prev_close = None
+    for date in use_dates:
         bars = daily_bars_raw[date]
         if not bars:
             continue
@@ -93,12 +103,14 @@ def calc_60d_amplitude(code: str, start_date: str, lookback: int = 60):
             continue
         day_high = max(highs)
         day_low = min(lows)
-        prev_close = bars[0]["open"]
+        if prev_close is None:
+            prev_close = bars[0]["open"]
         if prev_close > 0:
             amplitudes.append((day_high - day_low) / prev_close)
-    if len(amplitudes) < lookback:
+        prev_close = bars[-1]["close"]
+    if len(amplitudes) < 10:  # 至少10天数据
         return None
-    return sum(amplitudes[-lookback:]) / lookback
+    return sum(amplitudes) / len(amplitudes)
 
 
 def compute_daily_hl(daily_bars: dict) -> dict:
@@ -276,6 +288,10 @@ def run_single_stock(code: str, start: str, end: str):
     bt_params.max_holding_bars = backtest_params.max_holding_bars
     bt_params.cooldown_bars = backtest_params.cooldown_bars
     bt_params = adapt_params_by_frequency(bt_params, "5min", 48)
+    # J0+修复：adapt后重新应用mh24（避免被adapt覆盖为12）
+    bt_params.max_holding_bars = backtest_params.max_holding_bars
+    if bt_params.exposure_policy is not None:
+        bt_params.exposure_policy.max_holding_bars = backtest_params.max_holding_bars
 
     result = backtest_multi_day(
         code=code,
@@ -317,7 +333,7 @@ def main():
         print(f"[INFO] 振幅筛选: min_amplitude_long={min_amp}")
         filtered_codes = []
         for code in all_codes:
-            amp = calc_60d_amplitude(code, args.start, 60)
+            amp = calc_60d_amplitude(code, args.start, args.end, 60)
             if amp is not None and amp >= min_amp:
                 filtered_codes.append(code)
         print(f"[INFO] 振幅筛选后: {len(filtered_codes)} 只通过")

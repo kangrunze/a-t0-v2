@@ -138,15 +138,31 @@ class SignalParams:
     min_capture_spread_for_pairing: float = 0.006   # 平仓动态阈值的成本锚点（0.6%，与 RiskParams.min_capture_spread 对齐）
     pairing_max_regression_ratio: float = 0.5       # 动态阈值上限比例（开仓深度的50%）
 
-    # ── J2: 回踩入场参数（独立开关，默认关闭）──
+    # ── J2: 回踩入场参数（独立开关，2026-07-29 验证通过正式启用）──
     # 设计目标：在已确认的上涨趋势中，等价格回踩到VWAP附近再买入，
     # 而不是在趋势确认那一刻就追高入场。从而让买入点更贴近当日相对低点。
-    retracement_entry_enabled: bool = False   # 独立开关，默认关闭
+    # 验证：36股×3年×4组A/B，net_pnl+90%、CE均值+39%、win_rate维持69%
+    # dataclass默认False（yaml缺失时安全兜底），thresholds.yaml已设为true
+    retracement_entry_enabled: bool = False   # dataclass兜底=False；yaml生产配置=true
     retracement_min_adx: float = 25.0         # ADX需超过此值确认趋势存在
     retracement_vwap_band: float = 0.005      # |VWAP偏离| ≤ 此值视为"回踩到VWAP"（0.5%）
     retracement_lookback: int = 8             # 回看N根K线检查是否有过冲高
     retracement_min_surge: float = 0.005      # 回看期间最高价相对VWAP的最小偏离（0.5%）
     retracement_kdj_max: float = 60.0         # KDJ.K需低于此值（回踩时K回落，非追高）
+
+    # ── J4: 冲高确认参数（卖出侧，独立开关，2026-07-29 验证后拒绝启用）──
+    # 设计目标：在已确认的下跌趋势中，等价格冲高（反弹）到VWAP附近再卖出，
+    # 而不是在趋势确认那一刻就杀跌卖出。从而让卖出点更贴近当日相对高点。
+    # 与J2完全对称：J2买在回踩低位，J4卖在冲高高位。
+    # 验证结论：36股×3年×4组A/B + 20股×5参数敏感性检查证明J4结构性无效：
+    #   - J4单独使CE均值2.26%→1.82%（与设计目标相反）
+    #   - 根因：趋势跟随卖出逻辑"卖在强势区"已接近CE最优，J4"先跌后反弹到VWAP再卖"卖点更低
+    #   - 参数从松到紧：要么加量降质(CE降)，要么退化为baseline(无效)
+    surge_exit_enabled: bool = False          # 拒绝启用（结构性无效）
+    surge_vwap_band: float = 0.005            # |VWAP偏离| ≤ 此值视为"冲高到VWAP"（0.5%）
+    surge_lookback: int = 8                   # 回看N根K线检查是否有过深跌
+    surge_min_drop: float = 0.005             # 回看期间最低价相对VWAP的最小负偏离（0.5%）
+    surge_kdj_min: float = 40.0               # KDJ.K需高于此值（冲高时K回升，非杀跌）
 
 
 DEFAULT_PARAMS = SignalParams()
@@ -494,6 +510,49 @@ def evaluate_reduce_signal(
     total_score = extreme_score + confirm_score + (1 if filter_passed else 0)
     if not filter_passed:
         total_score = 0
+
+    # ═══ J4: 冲高确认（卖出侧分离模式：趋势确认 + 卖出价格确定 分离）═══
+    # 设计（与J2对称）：下跌趋势确认后，等价格冲高（反弹）到VWAP附近再卖出
+    #   - 趋势确认（历史）：过去N根K线有过深跌（recent_low < VWAP × (1-min_drop)）
+    #   - 冲高确认（当前）：价格从深跌区回升到VWAP附近（-band ≤ vwap_dev < 0）
+    #     + KDJ.K回升（K > kdj_min，确认是反弹而非深跌）
+    #   - 两者都满足时直接触发卖出信号，即使当前K线的4规则投票未通过
+    #   - 冲高条件不满足时，走原来的4规则投票逻辑（向后兼容）
+    if params.surge_exit_enabled and filter_passed:
+        vwap_val = snap.get("vwap")
+
+        # 条件1（卖出价格）：VWAP偏离在负向上限内（价格从深跌回升到VWAP附近）
+        surge_vwap_ok = (vwap_dev is not None and -params.surge_vwap_band <= vwap_dev < 0)
+        # 条件2（卖出价格）：KDJ.K已回升（K从低位反弹）
+        surge_kdj_ok = (k_val is not None and k_val > params.surge_kdj_min)
+        # 条件3（趋势确认）：近期有过深跌（下跌趋势存在过）
+        surge_lookback = params.surge_lookback
+        recent_bars = bars[-surge_lookback:] if len(bars) >= surge_lookback else bars
+        recent_low = min((b.get("low", float("inf")) for b in recent_bars), default=float("inf"))
+        had_drop = (vwap_val is not None and vwap_val > 0
+                    and recent_low < vwap_val * (1 - params.surge_min_drop))
+
+        surge_ok = surge_vwap_ok and surge_kdj_ok and had_drop
+        if surge_ok:
+            # 冲高触发：强制提升所有分数到触发阈值
+            total_score = max(total_score, params.min_rules_to_trigger)
+            extreme_score = max(extreme_score, params.extreme_min)
+            confirm_score = max(confirm_score, params.confirm_min)
+            fired.append(f"[冲高确认-触发] vwap_dev={vwap_dev_str}"
+                        f" K={'%.1f' % k_val if k_val else 'N/A'}"
+                        f" 近{surge_lookback}根低点偏离VWAP "
+                        f"{((recent_low/vwap_val-1)*100):.2f}%（≤-{params.surge_min_drop*100:.1f}%）"
+                        f" → 分离模式触发，不依赖当前4规则投票")
+        else:
+            # 冲高条件不满足，记录原因（走原逻辑）
+            reasons = []
+            if not surge_vwap_ok:
+                reasons.append(f"vwap_dev={vwap_dev_str}需在[-{params.surge_vwap_band*100:.1f}%, 0)")
+            if not surge_kdj_ok:
+                reasons.append(f"K={'%.1f' % k_val if k_val else 'N/A'}需>{params.surge_kdj_min}")
+            if not had_drop:
+                reasons.append(f"近{surge_lookback}根无深跌（需≤-{params.surge_min_drop*100:.1f}%）")
+            fired.append(f"[冲高确认-未触发] {', '.join(reasons)} → 走4规则投票")
 
     # 趋势跟随：不额外加严，trigger_threshold = min_rules_to_trigger
     trigger_threshold = params.min_rules_to_trigger
