@@ -36,7 +36,6 @@ signal:
   active_sell_pressure: 0.55        # 主动卖占比 > 此值视为卖压
   active_buy_pressure: 0.55         # 主动买占比 > 此值视为买盘
   min_rules_to_trigger: 3           # 4 项中至少 3 项满足
-  open_max_vwap_dev: 0.012          # 开仓深度上限（1.2%）：偏离过深禁止开仓，避免在趋势行情中被当逆势
   # ── 趋势跟随参数（2026-07-24 策略转向，当前主力逻辑）──
   # 数据诊断：5min VWAP偏离后65%概率延续，29%概率回归，转为顺趋势方向开仓
   tf_adx_threshold: 35.0            # ADX > 此值确认趋势存在（v5降频：30→35）
@@ -52,6 +51,26 @@ signal:
   alpha_weight_adx: 1.0
   alpha_weight_volume: 1.0
   alpha_threshold_open: 60.0         # 连续评分模式开仓门槛
+
+  # ── Stage K: 均值回归模式（与趋势跟随互斥，手动选择）──
+  # K0闸门：振幅筛选36只×3年，|vwap_dev|≥3%时回归概率55-64%且期望值为正
+  # 触发：z-score标准化 + 衰竭确认 + 量能约束
+  # 止盈：基于开仓时偏离度的绝对回归目标（非实时z，避免VWAP漂移立即平仓）
+  # 止损/持仓/仓位：在backtest段通过mr_*参数覆盖（比趋势跟随更紧）
+  #
+  # 100只随机抽样调参验证（2026-07-29，outputs/oos_validation/K_mr_fix_100.json）：
+  #   50训练 + 50验证，3年(2025-07-28~2026-07-22)，网格 z×rev_ratio
+  #   最优 z=1.0 rev=0.3：
+  #     训练集 配对17364 胜率69.0% payoff3.41 净+614,971 盈利48/50
+  #     验证集 配对15740 胜率67.7% payoff3.49 净+463,609 盈利49/50（OOS稳定）
+  #   修复前问题：原平仓逻辑用实时z-score，VWAP漂移导致开仓后立即平仓（持仓=0，买卖点距离0.02%）
+  #   修复：改为基于开仓时|open_vwap_dev|的绝对回归目标，加最小回归幅度约束
+  strategy_mode: trend_following     # trend_following（默认）| mean_reversion
+  mr_z_threshold: 1.0               # z-score触发阈值（100只调参最优：1.5→1.0）
+  mr_lookback_bars: 12              # 回看窗口（计算价格极值、衰竭确认）
+  mr_take_profit_reversion_ratio: 0.3  # 止盈回归比例（100只调参最优：0.5→0.3，更紧平仓）
+  mr_min_reversion: 0.001           # 最小回归幅度：至少回归0.1%才平仓（防立即平仓）
+  mr_vol_ratio_max: 1.5             # 量比上限：量比>此值视为趋势加速（不触发）
   # ── J2: 回踩入场（买入侧分离模式，2026-07-29 验证通过正式启用）──
   # 设计：趋势确认（历史冲高）+ 入场价格确定（回踩到VWAP附近）分离
   # 验证依据（36股×3年×4组A/B，新VWAP基线 sl=0.002/tr=0.2）：
@@ -61,7 +80,6 @@ signal:
   #   机制：回踩到VWAP附近买入，买入点更贴近日内相对低点 → CE大幅提升
   #   payoff略降（2.31→2.07）但被CE和net_pnl的大幅改善覆盖
   retracement_entry_enabled: true       # 正式启用（2026-07-29 四组验证通过）
-  retracement_min_adx: 25.0             # ADX需超过此值确认趋势存在
   retracement_vwap_band: 0.02           # |VWAP偏离| ≤ 此值视为"回踩到VWAP"（2%，36股网格最优）
   retracement_lookback: 8               # 回看N根K线检查是否有过冲高
   retracement_min_surge: 0.005          # 回看期间最高价相对VWAP的最小偏离（0.5%）
@@ -146,7 +164,7 @@ backtest:
   slippage: 0.001                   # 滑点（0.1%）— 兼容字段
   cooldown_bars: 24                 # 信号触发后N根K线内不再触发同方向信号（cd24，2026-07-28定案）
   require_opposite_direction: true  # 有未配对腿时只允许反方向信号
-  max_holding_bars: 24              # P0-2: 单笔最大持仓K线数（mh24，cd24/mh24组合验证过）
+  max_holding_bars: 24              # 趋势跟随默认值（注意：运行时会被 cli.adapt_params_by_frequency 按频率覆盖为 5min=12 / 1min=60）
   # ── 止损/止盈结构（2026-07-29 J0+网格搜索定案，新VWAP基线）──
   # 历史依据：
   #   0.004（0.4%）— 51股早期 train/test 验证 + 振幅筛选后网格搜索最优（payoff=0.70, net=+22049）[旧VWAP]
@@ -168,6 +186,13 @@ backtest:
   #     机制：新VWAP入场点更准，不需给大回吐空间；tr越小止盈越紧
   trailing_ratio: 0.2               # 移动止盈回撤比例（从最高点回吐20%触发，新VWAP网格最优）
   trailing_activation_pct: 0.0      # 移动止盈激活门槛：0=有盈即锁（J0+网格：0远优于0.003/0.005/0.008）
+
+  # ── Stage K: 均值回归模式专用风控参数（strategy_mode=mean_reversion时生效）──
+  # 比趋势跟随更紧：预期胜率低，单笔风险敞口收窄
+  mr_stop_loss_ratio: 0.0015       # 止损0.15%（趋势跟随0.002更紧）
+  mr_max_holding_bars: 10          # 最大持仓10根（趋势跟随24更短，回归是短期现象）
+  mr_max_t_size_ratio: 0.12        # 仓位12%（趋势跟随0.25更小）
+  mr_cooldown_bars: 8              # 冷却8根（趋势跟随24更短）
 
 # ── P1: 测量层配置（主计划 S2.6 / S3）──
 measurement:

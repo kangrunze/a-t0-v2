@@ -49,6 +49,7 @@ from typing import Optional
 
 from .features import compute_reference_snapshot, detect_market_regime
 from .features import merge_with_reference_snapshot
+from .features import atr_relative
 from .features import (
     market_gate_for_add,
     market_gate_for_reduce,
@@ -101,12 +102,6 @@ class SignalParams:
     extreme_min: int = 2                    # 极值层至少满足项数
     confirm_min: int = 1                    # 确认层至少满足项数
 
-    # 方案A（开仓深度上限）：偏离过深时禁止开仓，从源头减少无法回归的超时腿
-    # 诊断显示 86.7% 超时腿因 open_too_deep：开仓在深偏离区，1小时窗口内回归不到平仓阈值
-    # 2026-07-24 诊断：2.0% 深度的开仓止损均亏-873（3.9%不利移动），深偏离往往是真趋势而非回归
-    # 收紧到 1.2%：只开 0.8%~1.2% 甜区，避免在趋势行情中被当成逆势开仓
-    open_max_vwap_dev: float = 0.012
-
     # ── 趋势跟随参数（2026-07-24 策略转向）──
     # 数据诊断：5min VWAP偏离后65%概率延续，29%概率回归
     # 均值回归策略在A股5min级别不可行，转为顺趋势方向开仓
@@ -144,7 +139,6 @@ class SignalParams:
     # 验证：36股×3年×4组A/B，net_pnl+90%、CE均值+39%、win_rate维持69%
     # dataclass默认False（yaml缺失时安全兜底），thresholds.yaml已设为true
     retracement_entry_enabled: bool = False   # dataclass兜底=False；yaml生产配置=true
-    retracement_min_adx: float = 25.0         # ADX需超过此值确认趋势存在
     retracement_vwap_band: float = 0.005      # |VWAP偏离| ≤ 此值视为"回踩到VWAP"（0.5%）
     retracement_lookback: int = 8             # 回看N根K线检查是否有过冲高
     retracement_min_surge: float = 0.005      # 回看期间最高价相对VWAP的最小偏离（0.5%）
@@ -163,6 +157,19 @@ class SignalParams:
     surge_lookback: int = 8                   # 回看N根K线检查是否有过深跌
     surge_min_drop: float = 0.005             # 回看期间最低价相对VWAP的最小负偏离（0.5%）
     surge_kdj_min: float = 40.0               # KDJ.K需高于此值（冲高时K回升，非杀跌）
+
+    # ── Stage K: 均值回归参数（独立模式，与趋势跟随互斥）──
+    # K0闸门诊断：振幅筛选36只×3年，|vwap_dev|≥3%时回归概率55-64%且期望值为正
+    # 触发逻辑：z-score标准化 + 衰竭确认 + 保守止盈止损
+    # 模式选择：strategy_mode="trend_following"(默认) 或 "mean_reversion"
+    # 100只调参最优值（2026-07-29）：z=1.0、rev_ratio=0.3，OOS验证稳定（详见thresholds.yaml注释）
+    strategy_mode: str = "trend_following"
+    mr_z_threshold: float = 1.0              # z-score阈值（100只调参最优：1.5→1.0）
+    mr_lookback_bars: int = 12               # 回看窗口（计算价格极值、衰竭确认）
+    mr_vol_ratio_max: float = 1.5            # 量比上限：量比>此值视为趋势仍在加速（不触发均值回归）
+    # 平仓：基于开仓时偏离度的绝对回归目标（非实时z，避免VWAP漂移导致立即平仓）
+    mr_take_profit_reversion_ratio: float = 0.3  # 100只调参最优：0.5→0.3（更紧平仓）
+    mr_min_reversion: float = 0.001          # 最小回归幅度：|open_vwap_dev|-|当前vwap_dev| ≥ 此值才平仓（防立即平仓）
 
 
 DEFAULT_PARAMS = SignalParams()
@@ -193,6 +200,8 @@ class TSignal:
     is_pairing: bool = False                 # 是否为平仓评估（vs 新开仓评估）
     pairing_near_vwap: bool = False          # 平仓：价格已回归 VWAP 附近
     pairing_direction_confirmed: bool = False  # 平仓：轻量方向确认（不创新极值）
+    # Stage K: 信号来源标记（trend_following / mean_reversion），用于分组统计
+    signal_source: str = "trend_following"
 
     @property
     def triggered(self) -> bool:
@@ -405,11 +414,22 @@ def evaluate_reduce_signal(
                   新增代码不应依赖此参数。
     """
     params = params or DEFAULT_PARAMS
-    snap = compute_reference_snapshot(bars, current_price, prev_close)
+    snap = compute_reference_snapshot(bars, current_price, prev_close, params=params)
     if not snap:
         return TSignal(direction="reduce")
 
     snap = merge_with_reference_snapshot(snap, quote_feats)
+
+    # Stage K: 均值回归模式（与趋势跟随互斥，手动选择）
+    if params.strategy_mode == "mean_reversion":
+        filter_passed = not is_limit_up_locked
+        mr_signal = _evaluate_mean_reversion(
+            snap, bars, params, direction="reduce",
+            is_for_pairing=is_for_pairing,
+            filter_passed=filter_passed,
+            open_vwap_dev=open_vwap_dev,
+        )
+        return mr_signal if mr_signal is not None else TSignal(direction="reduce")
 
     fired: list[str] = []
     extreme_score = 0  # 极值层计分（0-3）
@@ -575,6 +595,161 @@ def evaluate_reduce_signal(
 
 
 # ═══════════════════════════════════════════════════════════════
+# Stage K: 均值回归信号评估
+# ═══════════════════════════════════════════════════════════════
+def _evaluate_mean_reversion(
+    snap: dict,
+    bars: list[dict],
+    params: SignalParams,
+    direction: str,  # "add" (买入侧) 或 "reduce" (卖出侧)
+    is_for_pairing: bool,
+    filter_passed: bool,
+    open_vwap_dev: Optional[float] = None,
+) -> Optional[TSignal]:
+    """均值回归信号评估。
+
+    触发逻辑（开仓）：
+      1. z-score = |vwap_dev| / (atr/vwap) ≥ mr_z_threshold
+      2. 衰竭确认：回看窗口内价格已从极端位回落（不再创新极值）
+      3. 量比不能太高（趋势仍在加速时不触发）
+      4. 方向：vwap_dev<0 → 买入(add)；vwap_dev>0 → 卖出(reduce)
+
+    平仓逻辑（is_for_pairing=True）：
+      z-score 回归到 mr_take_profit_z 以下（回到VWAP附近）
+    """
+    vwap_dev = snap.get("vwap_dev")
+    atr = snap.get("atr")
+    vwap = snap.get("vwap")
+    vol_ratio = snap.get("volume_ratio")
+    price = snap["current_price"]
+
+    if vwap_dev is None or atr is None or vwap is None or vwap <= 0 or atr <= 0:
+        return None
+
+    # z-score 标准化（用 features 层公共函数，避免公式漂移）
+    atr_rel = atr_relative(atr, vwap)
+    if atr_rel is None or atr_rel <= 0:
+        return None
+    z_score = abs(vwap_dev) / atr_rel
+
+    vwap_dev_str = f"{vwap_dev*100:+.2f}%"
+    z_str = f"{z_score:.2f}"
+    vol_str = f"{vol_ratio:.2f}" if vol_ratio is not None else "N/A"
+
+    # ── 平仓分支：基于开仓时偏离度的绝对回归目标 ──
+    if is_for_pairing:
+        # 平仓条件：当前|vwap_dev| ≤ 开仓时|open_vwap_dev| × 回归比例
+        # 且至少回归了 mr_min_reversion 的绝对幅度（过滤开仓后立即平仓）
+        if open_vwap_dev is None or open_vwap_dev == 0:
+            # 没有开仓基准，不触发平仓
+            return TSignal(
+                direction=direction, signal_source="mean_reversion",
+                price=price, snapshot=snap,
+            )
+        open_abs = abs(open_vwap_dev)
+        curr_abs = abs(vwap_dev)
+        reversion_amount = open_abs - curr_abs  # 正=已回归
+        target = open_abs * params.mr_take_profit_reversion_ratio
+        near_vwap = curr_abs <= target and reversion_amount >= params.mr_min_reversion
+        fired = [
+            f"[MR平仓] 开仓偏离{open_vwap_dev*100:+.2f}% → 当前{vwap_dev*100:+.2f}%",
+            f"  回归{reversion_amount*100:.2f}% 目标{target*100:.2f}% "
+            f"({'达到' if near_vwap else '未达'}，需≥{params.mr_min_reversion*100:.1f}%)",
+        ]
+        return TSignal(
+            direction=direction,
+            rules_fired=fired,
+            rules_score=2 if (near_vwap and filter_passed) else 0,
+            price=price,
+            snapshot=snap,
+            layer_scores={},
+            trigger_threshold=2,
+            extreme_score=0,
+            confirm_score=0,
+            filter_passed=filter_passed,
+            extreme_min=0,
+            confirm_min=0,
+            is_pairing=True,
+            pairing_near_vwap=near_vwap,
+            pairing_direction_confirmed=True,
+            signal_source="mean_reversion",
+        )
+
+    # ── 开仓分支 ──
+    # 方向判断：vwap_dev<0 → 买入(add)；vwap_dev>0 → 卖出(reduce)
+    if direction == "add" and vwap_dev >= 0:
+        return None  # 买入侧需要价格在VWAP下方
+    if direction == "reduce" and vwap_dev <= 0:
+        return None  # 卖出侧需要价格在VWAP上方
+
+    fired = []
+    score = 0
+
+    # 条件1：z-score 超标（偏离幅度相对自身波动率足够大）
+    z_ok = z_score >= params.mr_z_threshold
+    if z_ok:
+        fired.append(f"[MR极值] z={z_str} ≥ {params.mr_z_threshold}（偏离{vwap_dev_str}，标准化后超标）")
+        score += 1
+    else:
+        return None  # z不达标直接返回，不继续评估
+
+    # 条件2：衰竭确认（回看窗口内价格已从极端位回落）
+    lookback = params.mr_lookback_bars
+    recent_bars = bars[-lookback:] if len(bars) >= lookback else bars
+    if direction == "add":
+        # 买入侧：价格在VWAP下方，回看窗口内最低价 < 当前价（已从最低点回升）
+        recent_low = min((float(b.get("low", 0)) for b in recent_bars), default=0)
+        fatigue_ok = recent_low < price and recent_low > 0
+        if fatigue_ok:
+            fired.append(f"[MR衰竭] 近{lookback}根最低{recent_low:.2f} < 当前{price:.2f}（已从低点回升）")
+            score += 1
+    else:
+        # 卖出侧：价格在VWAP上方，回看窗口内最高价 > 当前价（已从高点回落）
+        recent_high = max((float(b.get("high", 0)) for b in recent_bars), default=0)
+        fatigue_ok = recent_high > price and recent_high > 0
+        if fatigue_ok:
+            fired.append(f"[MR衰竭] 近{lookback}根最高{recent_high:.2f} > 当前{price:.2f}（已从高点回落）")
+            score += 1
+
+    # 条件3：量比不能太高（趋势仍在加速时不触发均值回归）
+    vol_ok = vol_ratio is None or vol_ratio <= params.mr_vol_ratio_max
+    if vol_ok:
+        fired.append(f"[MR量能] 量比{vol_str} ≤ {params.mr_vol_ratio_max}（趋势未加速）")
+        score += 1
+    else:
+        fired.append(f"[MR量能] 量比{vol_str} > {params.mr_vol_ratio_max}（趋势加速中，不触发）")
+
+    # 环境层
+    if filter_passed:
+        fired.append("[MR环境] 可成交")
+    else:
+        fired.append("[MR环境] 不可成交（硬否决）")
+
+    total_score = score + (1 if filter_passed else 0)
+    if not filter_passed:
+        total_score = 0
+
+    return TSignal(
+        direction=direction,
+        rules_fired=fired,
+        rules_score=total_score,
+        price=price,
+        snapshot=snap,
+        layer_scores={"extreme": 1 if z_ok else 0,
+                      "confirm": 1 if fatigue_ok else 0,
+                      "filter": 1 if filter_passed else 0},
+        trend_context=None,
+        trigger_threshold=3,  # 需要z+衰竭+量能+环境都满足
+        extreme_score=1 if z_ok else 0,
+        confirm_score=1 if fatigue_ok else 0,
+        filter_passed=filter_passed,
+        extreme_min=1,
+        confirm_min=1,
+        signal_source="mean_reversion",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
 # 加仓/买回信号评估（反T-买入 / 正T-买回）
 # ═══════════════════════════════════════════════════════════════
 def evaluate_add_signal(
@@ -611,11 +786,22 @@ def evaluate_add_signal(
                   新增代码不应依赖此参数。
     """
     params = params or DEFAULT_PARAMS
-    snap = compute_reference_snapshot(bars, current_price, prev_close)
+    snap = compute_reference_snapshot(bars, current_price, prev_close, params=params)
     if not snap:
         return TSignal(direction="add")
 
     snap = merge_with_reference_snapshot(snap, quote_feats)
+
+    # Stage K: 均值回归模式（与趋势跟随互斥，手动选择）
+    if params.strategy_mode == "mean_reversion":
+        filter_passed = (not theme_retreated) and (not is_limit_down_locked)
+        mr_signal = _evaluate_mean_reversion(
+            snap, bars, params, direction="add",
+            is_for_pairing=is_for_pairing,
+            filter_passed=filter_passed,
+            open_vwap_dev=open_vwap_dev,
+        )
+        return mr_signal if mr_signal is not None else TSignal(direction="add")
 
     fired: list[str] = []
     extreme_score = 0  # 极值层计分（0-3）

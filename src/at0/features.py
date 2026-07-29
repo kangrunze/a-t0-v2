@@ -31,9 +31,13 @@ from __future__ import annotations
 # ── 顶层 import（合并三个文件的公共依赖）──
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from .data import run_westock, to_westock_symbol, get_themes_snapshot
+
+if TYPE_CHECKING:
+    # 仅类型检查用，避免运行时循环 import（strategy.py 依赖 features.py）
+    from .strategy import SignalParams
 
 
 # ═══ features: reference 层（VWAP/ATR/RSI/KDJ/MFI/BB/MACD/DMI/ADX） ═══
@@ -109,6 +113,19 @@ def vwap_deviation(price: float, vwap: Optional[float]) -> Optional[float]:
     if vwap is None or vwap <= 0:
         return None
     return (price - vwap) / vwap
+
+
+def atr_relative(atr: Optional[float], vwap: Optional[float]) -> Optional[float]:
+    """
+    ATR 相对 VWAP 的比例 = ATR / VWAP。
+
+    用于将绝对偏离度（vwap_dev）标准化为 z-score，以及极端趋势判定。
+    全局统一公式，避免 features.py 和 strategy.py 各自计算导致漂移。
+    ATR 或 VWAP 缺失/非正时返回 None。
+    """
+    if atr is None or vwap is None or vwap <= 0 or atr <= 0:
+        return None
+    return atr / vwap
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -609,6 +626,7 @@ def compute_reference_snapshot(
     bars: list[dict],
     current_price: Optional[float] = None,
     prev_close: Optional[float] = None,
+    params: Optional["SignalParams"] = None,
 ) -> dict:
     """
     一次性计算所有 L5 信号所需的参考指标。
@@ -617,6 +635,7 @@ def compute_reference_snapshot(
       bars: 1 分钟 K 线列表（按时间升序，最后一根是最新的）
       current_price: 当前价（实盘从 quote 取；回测用最后一根 close）
       prev_close: 昨收（用于开盘区间突破判断）
+      params: SignalParams，传入则用配置中的指标周期；None 则用默认值（向后兼容）
 
     返回 dict，包含所有指标。任何指标数据不足时值为 None。
     """
@@ -626,19 +645,33 @@ def compute_reference_snapshot(
     if current_price is None:
         current_price = bars[-1]["close"]
 
+    # 指标周期：params 传入则用配置值，否则用默认值（向后兼容 __main__ 自检和旧调用）
+    p = params
+    bb_period = p.bb_period if p else 20
+    bb_std = p.bb_std if p else 2.0
+    rsi_period = p.rsi_period if p else 14
+    kdj_n = p.kdj_n if p else 9
+    kdj_m1 = p.kdj_m1 if p else 3
+    kdj_m2 = p.kdj_m2 if p else 3
+    vol_lb = p.vol_ratio_lookback if p else 5
+    vol_bl = p.vol_ratio_baseline if p else 20
+    ema_period = p.ema_period if p else 20
+    atr_period = rsi_period  # ATR 无独立配置，复用 rsi_period（均为14）
+
     vwap = cumulative_vwap(bars)
     vwap_dev = vwap_deviation(current_price, vwap)
-    bb_mid, bb_upper, bb_lower = intraday_bollinger(bars, period=20, num_std=2.0)
+    bb_mid, bb_upper, bb_lower = intraday_bollinger(bars, period=bb_period, num_std=bb_std)
     or_high, or_low = opening_range(bars)
-    atr = intraday_atr(bars, period=14)
-    rsi_val = rsi(bars, period=14)
-    k_val, d_val, j_val = kdj(bars, n=9, m1=3, m2=3)
-    vol_ratio = volume_ratio(bars, lookback=5, baseline=20)
+    atr = intraday_atr(bars, period=atr_period)
+    rsi_val = rsi(bars, period=rsi_period)
+    k_val, d_val, j_val = kdj(bars, n=kdj_n, m1=kdj_m1, m2=kdj_m2)
+    vol_ratio = volume_ratio(bars, lookback=vol_lb, baseline=vol_bl)
 
-    # 最近 5 分钟成交量（用于"缩量冲高"判断）
-    recent_5_vol = sum(b["volume"] for b in bars[-5:]) if len(bars) >= 5 else None
+    # 最近 vol_lb 根成交量（用于"缩量冲高"判断）
+    recent_5_vol = sum(b["volume"] for b in bars[-vol_lb:]) if len(bars) >= vol_lb else None
     prior_20_vol_avg = (
-        sum(b["volume"] for b in bars[-25:-5]) / 20 if len(bars) >= 25 else None
+        sum(b["volume"] for b in bars[-(vol_bl + vol_lb):-vol_lb]) / vol_bl
+        if len(bars) >= vol_bl + vol_lb else None
     )
 
     # 连续缩量且不再创新低（地量企稳信号）
@@ -646,19 +679,19 @@ def compute_reference_snapshot(
 
     # ── 广算扩展指标（决策层按需取用，计算成本低）──
     # 均线/位置基准
-    ema_val = ema(bars, period=20)
+    ema_val = ema(bars, period=ema_period)
     ma5_val = ma(bars, period=5)
-    ma20_val = ma(bars, period=20)
+    ma20_val = ma(bars, period=ema_period)
     # 动量超买超卖（与 RSI/KDJ 高度相关，决策层择一即可）
-    cci_val = cci(bars, period=14)
+    cci_val = cci(bars, period=atr_period)
     bias_val = bias(bars, period=6)
     roc_val = roc(bars, period=12)
     # 趋势强度（滞后，建议作 5-15 分钟级辅助过滤，不作 1 分钟触发）
     macd_dif, macd_dea, macd_hist = macd(bars, fast=12, slow=26, signal=9)
-    pdi_val, mdi_val, adx_val = dmi(bars, period=14)
+    pdi_val, mdi_val, adx_val = dmi(bars, period=atr_period)
     # 量能/资金
     obv_val = obv(bars)
-    mfi_val = mfi(bars, period=14)
+    mfi_val = mfi(bars, period=atr_period)
 
     return {
         "current_price": current_price,
@@ -723,10 +756,11 @@ def _consecutive_shrink_no_new_low(bars: list[dict], lookback: int = 3) -> bool:
 # ═══════════════════════════════════════════════════════════════
 # 市场状态识别（P0-6: regime 归入 features 层）
 # ═══════════════════════════════════════════════════════════════
-# @deprecated 分钟级 regime 识别。strategy.py 的 _judge_trend_context 调用此函数，
-# 但趋势跟随转向后 trend_context 仅作信息记录，不参与决策。
-# 日线级 regime 识别见 at0.regime.classify_daily_regime（Stage E 新增）。
-# 新增代码不应依赖此函数做决策。
+# 分钟级 regime 识别。strategy.py 的 _judge_trend_context 调用此函数产出 trend_context。
+# trend_context 用途：(a) 通过 TSignal 字段返回并记录；(b) backtest.py:733-740 的
+# hard_trend_filter_add/reduce 硬趋势门控（默认关闭，开启后否决逆趋势信号）。
+# 即 trend_context 并非"仅信息记录"，开启硬趋势门控后参与决策。
+# 日线级 regime 识别见 at0.regime.classify_daily_regime（Stage E 新增，当前 @deprecated）。
 def detect_market_regime(
     snap: dict,
     adx_trend_threshold: float = 25.0,
@@ -772,9 +806,9 @@ def detect_market_regime(
 
     # 极端趋势：ADX 极高 + 价格远离 VWAP
     if adx >= adx_extreme_threshold:
-        if vwap and vwap > 0 and atr and atr > 0 and vwap_dev is not None:
-            atr_relative = atr / vwap
-            extreme_dev = extreme_vwap_dev_multiplier * atr_relative
+        atr_rel = atr_relative(atr, vwap)
+        if atr_rel is not None and vwap_dev is not None:
+            extreme_dev = extreme_vwap_dev_multiplier * atr_rel
             if abs(vwap_dev) >= extreme_dev:
                 return "extreme"
 
@@ -1095,24 +1129,41 @@ class MarketSnapshot:
     timestamp: Optional[str] = None            # 快照时间 ISO
     source: str = "westock"                    # 数据源标记
 
+    # ── 情绪分级阈值（从 thresholds.yaml market 段加载，默认值与 yaml 对齐）──
+    # 通过 load_market_thresholds() 类方法加载；未加载时用默认值（向后兼容）。
+    _hot_up_limit: int = 80
+    _hot_down_limit_max: int = 10       # HOT 要求跌停 ≤ 此值
+    _cold_up_limit: int = 20
+    _cold_down_limit: int = 50
+    _cool_up_ratio: float = 30.0
+
+    @classmethod
+    def load_market_thresholds(cls, thresholds: dict) -> None:
+        """从 thresholds.yaml 的 market 段加载情绪分级阈值。"""
+        cls._hot_up_limit = int(thresholds.get("hot_up_limit", 80))
+        cls._hot_down_limit_max = int(thresholds.get("hot_down_limit_max", 10))
+        cls._cold_up_limit = int(thresholds.get("cold_up_limit", 20))
+        cls._cold_down_limit = int(thresholds.get("cold_down_limit", 50))
+        cls._cool_up_ratio = float(thresholds.get("cool_up_ratio", 30.0))
+
     @property
     def market_sentiment(self) -> str:
         """
         市场情绪分级（供个股层门控）。
 
-        判定逻辑（优先级从高到低）:
-          1. 涨停 ≥ 80 且 跌停 ≤ 10 → HOT（赚钱效应强，可正常做T）
-          2. 涨停 ≤ 20 或 跌停 ≥ 50 → COLD（赚钱效应弱，减仓信号宽松/加仓信号严格）
-          3. 上涨占比 ≤ 30% → COOL（偏冷，谨慎）
+        判定逻辑（优先级从高到低，阈值从 thresholds.yaml market 段加载）:
+          1. 涨停 ≥ hot_up_limit 且 跌停 ≤ hot_down_limit_max → HOT
+          2. 涨停 ≤ cold_up_limit 或 跌停 ≥ cold_down_limit → COLD
+          3. 上涨占比 ≤ cool_up_ratio → COOL
           4. 其余 → NEUTRAL
         数据缺失时返回 NEUTRAL（不阻塞）。
         """
         if self.up_limit_count is not None and self.down_limit_count is not None:
-            if self.up_limit_count >= 80 and self.down_limit_count <= 10:
+            if self.up_limit_count >= self._hot_up_limit and self.down_limit_count <= self._hot_down_limit_max:
                 return "HOT"
-            if self.up_limit_count <= 20 or self.down_limit_count >= 50:
+            if self.up_limit_count <= self._cold_up_limit or self.down_limit_count >= self._cold_down_limit:
                 return "COLD"
-        if self.up_ratio is not None and self.up_ratio <= 30:
+        if self.up_ratio is not None and self.up_ratio <= self._cool_up_ratio:
             return "COOL"
         return "NEUTRAL"
 

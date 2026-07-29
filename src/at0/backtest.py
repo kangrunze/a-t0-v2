@@ -19,33 +19,32 @@ backtest 层的统一入口。原始脚本暂保留在 scripts/ 不动，本文�
 """
 from __future__ import annotations
 
-import csv
 import hashlib
 import itertools
 import json
 import subprocess
 import sys
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from .features import compute_reference_snapshot, cumulative_vwap
+from .features import compute_reference_snapshot
 from .strategy import (
-    SignalParams, DEFAULT_PARAMS,
+    SignalParams,
     evaluate_reduce_signal, evaluate_add_signal,
 )
 # P0 整改：引入统一成本模型、交易生命周期、敞口策略
 from .risk import (
-    RiskParams, DEFAULT_RISK_PARAMS,
+    RiskParams,
     CostModel, ExposurePolicy,
     approve_signal, eod_risk_disposal, EodRiskEvent,
 )
-from .execution import TradeLifecycle, LegStatus
+from .execution import TradeLifecycle
 # P1: 测量层（主计划 S2.6 核心新增能力）
 from .strategy import compute_alpha_score
 from .measurement import (
-    compute_ic, compute_alpha_decay,
+    compute_alpha_decay,
     compute_trade_quality,
     compute_stratified_report,
     scan_param_landscape,
@@ -367,6 +366,47 @@ class BacktestParams:
     # 硬趋势门控（正T卖出需 trend_context ∈ {trend_down, range}；trend_up/extreme 否决）
     hard_trend_filter_reduce: bool = False
 
+    # ── Stage K: MR 模式专用风控覆盖（strategy_mode=mean_reversion 时生效）──
+    # None 表示未配置，回退到上方趋势跟随默认值；yaml 设置后覆盖。
+    # 由 effective_* property 统一决策，消费点应使用 params.effective_stop_loss_ratio 等。
+    mr_stop_loss_ratio: Optional[float] = None
+    mr_max_holding_bars: Optional[int] = None
+    mr_cooldown_bars: Optional[int] = None
+    mr_max_t_size_ratio: Optional[float] = None
+
+    @property
+    def is_mean_reversion(self) -> bool:
+        """当前是否为均值回归模式。"""
+        return self.signal_params.strategy_mode == "mean_reversion"
+
+    @property
+    def effective_stop_loss_ratio(self) -> float:
+        """止损比例：MR 模式且配置了 mr_stop_loss_ratio 时覆盖，否则用趋势跟随值。"""
+        if self.is_mean_reversion and self.mr_stop_loss_ratio is not None:
+            return self.mr_stop_loss_ratio
+        return self.stop_loss_ratio
+
+    @property
+    def effective_max_holding_bars(self) -> int:
+        """最大持仓K线数：MR 模式且配置了 mr_max_holding_bars 时覆盖。"""
+        if self.is_mean_reversion and self.mr_max_holding_bars is not None:
+            return self.mr_max_holding_bars
+        return self.max_holding_bars
+
+    @property
+    def effective_cooldown_bars(self) -> int:
+        """信号冷却K线数：MR 模式且配置了 mr_cooldown_bars 时覆盖。"""
+        if self.is_mean_reversion and self.mr_cooldown_bars is not None:
+            return self.mr_cooldown_bars
+        return self.cooldown_bars
+
+    @property
+    def effective_max_t_size_ratio(self) -> float:
+        """单笔仓位比例：MR 模式且配置了 mr_max_t_size_ratio 时覆盖。"""
+        if self.is_mean_reversion and self.mr_max_t_size_ratio is not None:
+            return self.mr_max_t_size_ratio
+        return self.risk_params.max_t_size_ratio
+
     def get_cost_model(self) -> CostModel:
         """获取统一成本模型（兼容旧字段）。"""
         if self.cost_model is not None:
@@ -378,11 +418,11 @@ class BacktestParams:
         )
 
     def get_exposure_policy(self) -> ExposurePolicy:
-        """获取敞口策略（兼容旧字段）。"""
+        """获取敞口策略（兼容旧字段，MR 模式自动用 effective_max_holding_bars）。"""
         if self.exposure_policy is not None:
             return self.exposure_policy
         return ExposurePolicy(
-            max_holding_bars=self.max_holding_bars,
+            max_holding_bars=self.effective_max_holding_bars,
             require_opposite_direction=self.require_opposite_direction,
         )
 
@@ -498,7 +538,7 @@ def backtest_single_day(
     state = BacktestState(
         base_shares=effective_base_shares,  # P0-9: 含昨日 locked 累加
         avg_cost=params.avg_cost,
-        lifecycle=TradeLifecycle(max_holding_bars=params.max_holding_bars),
+        lifecycle=TradeLifecycle(max_holding_bars=params.effective_max_holding_bars),
     )
     # P0-6: 推断数据频率，供 _judge_trend_context 自适应 min_bars_for_trend
     frequency = _infer_frequency(bars)
@@ -542,7 +582,7 @@ def backtest_single_day(
         # 未激活：固定止损 stop_loss_ratio 防大亏（参数化，见 BacktestParams/thresholds.yaml）
         stopped_legs = state.lifecycle.check_stop_loss(
             i, bar,
-            stop_loss_ratio=params.stop_loss_ratio,
+            stop_loss_ratio=params.effective_stop_loss_ratio,
             trailing_ratio=params.trailing_ratio,
             trailing_activation_pct=params.trailing_activation_pct,
         )
@@ -651,15 +691,15 @@ def backtest_single_day(
             for leg in state.lifecycle.open_legs:
                 if leg.direction == "buy":
                     buy_open_vwap_dev = leg.open_vwap_dev
-                    buy_holding_ratio = (leg.holding_bars / params.max_holding_bars
-                                         if params.max_holding_bars > 0 else 0.0)
+                    buy_holding_ratio = (leg.holding_bars / params.effective_max_holding_bars
+                                         if params.effective_max_holding_bars > 0 else 0.0)
                     break
         if has_sell_open:
             for leg in state.lifecycle.open_legs:
                 if leg.direction == "sell":
                     sell_open_vwap_dev = leg.open_vwap_dev
-                    sell_holding_ratio = (leg.holding_bars / params.max_holding_bars
-                                          if params.max_holding_bars > 0 else 0.0)
+                    sell_holding_ratio = (leg.holding_bars / params.effective_max_holding_bars
+                                          if params.effective_max_holding_bars > 0 else 0.0)
                     break
 
         # 评估信号
@@ -713,8 +753,8 @@ def backtest_single_day(
             add_ok = _alpha_a >= params.signal_params.alpha_threshold_open and not is_limit_down_locked
 
         # 约束: cooldown_bars
-        if (params.cooldown_bars > 0 and state.last_signal_bar >= 0
-                and (i - state.last_signal_bar) < params.cooldown_bars):
+        if (params.effective_cooldown_bars > 0 and state.last_signal_bar >= 0
+                and (i - state.last_signal_bar) < params.effective_cooldown_bars):
             if state.last_signal_dir == "sell":
                 reduce_ok = False
             elif state.last_signal_dir == "buy":
@@ -794,7 +834,7 @@ def _execute_trade(
 
     decision = approve_signal(
         direction=direction,
-        requested_shares=int(state.base_shares * params.risk_params.max_t_size_ratio),
+        requested_shares=int(state.base_shares * params.effective_max_t_size_ratio),
         open_legs=state.lifecycle.export_open_legs(),
         bar_idx=bar_idx,
         bars_count=bars_count,
@@ -802,7 +842,7 @@ def _execute_trade(
         sellable_shares=state.sellable_shares,
         t_trades_today=state.t_trades_today,
         max_t_trades_per_day=params.risk_params.max_t_trades_per_day,
-        max_t_size_ratio=params.risk_params.max_t_size_ratio,
+        max_t_size_ratio=params.effective_max_t_size_ratio,
         base_shares=state.base_shares,
         l1_systemic_risk=l1_systemic_risk,
         theme_retreated=theme_retreated,

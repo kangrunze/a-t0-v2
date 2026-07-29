@@ -324,10 +324,12 @@ def run_zz500_single(
             params.exposure_policy.max_holding_bars = bp_kwargs["max_holding_bars"]
     print(f"[run_zz500] warmup_bars={params.warmup_bars}, "
           f"eod_check_bar_idx={params.eod_check_bar_idx}, "
-          f"stop_loss={params.stop_loss_ratio}, "
-          f"max_hold={params.max_holding_bars}, "
-          f"cooldown={params.cooldown_bars}, "
-          f"hard_trend_add={params.hard_trend_filter_add}, "
+          f"stop_loss={params.effective_stop_loss_ratio} "
+          f"(base={params.stop_loss_ratio}, mr={params.mr_stop_loss_ratio}), "
+          f"max_hold={params.effective_max_holding_bars} "
+          f"(base={params.max_holding_bars}, mr={params.mr_max_holding_bars}), "
+          f"cooldown={params.effective_cooldown_bars}, "
+          f"mode={params.signal_params.strategy_mode}, "
           f"tf_adx={params.signal_params.tf_adx_threshold}, "
           f"min_cap={params.risk_params.min_capture_spread}")
 

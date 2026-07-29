@@ -530,3 +530,36 @@ run (cli.py)
 |---|---|---|
 | `reduce` | `sell` | 正T-卖出（卖底仓等回落买回） |
 | `add` | `buy` | 反T-买入（买入等反弹卖出） |
+
+---
+
+## 11. 回测口径与数据质量须知（2026-07-29 增补）
+
+> 详细分析与量化改进建议见 `docs/BACKTEST_DATA_AND_QUANT_REVIEW.md`。本节为运行/解读回测时**必须知晓**的口径与风险。
+
+### 11.1 指标口径（避免误读）
+
+- **胜率双口径**：`batch_summary_*.json` 的 `win_rate` 为**配对口径**（盈利配对 / 总配对）；单股 `report.json` 顶层 `win_rate` 为**全口径**（盈利交易 / 总交易，含未配对腿）。同一标的两者可相差约 2 倍（如 688498：73.8% vs 36.9%）。解读时务必确认口径。
+- **net_pnl 为独立求和**：各股以 `base_shares=3000` 独立回测后直接相加，**未做组合层资本约束/相关性/回撤聚合**。标题净盈亏（如 TF OOS 1.10M）不是可实现的组合收益。
+- **成本场景未生效**：运行参数 `cost_model=null`，仅使用 base 成本（0.27%）。yaml 中 optimistic(0.2%)/pessimistic(0.5%) 场景**未在回测加载**，悲观情景净盈亏未知。
+
+### 11.2 方法论风险（上线前必查）
+
+- **OOS 不纯**：`outputs/oos_validation/step1_sample_overlap.json` 显示 36 只"OOS"中有 8 只与调参样本 `training_100` 重叠（`consistent_with_F5=false`），这 8 只捕获效率(CE)约为干净 OOS 的 2 倍。诚实干净 OOS 净盈亏应约 0.89M（28 只）。
+- **近乎普涨**：关掉振幅筛选后 500 只仍有 95.2% 盈利，说明正期望主要来自 T+0 配对机制本身；回测净盈亏为**乐观上界**，落地后大概率显著低于当前数值。
+- **数据覆盖不均**：成分股调入调出导致各股有效交易日差异大（如 001221 仅 237 日，688498 达 725 日）。跨股比较净盈亏需按 `净盈亏/交易日` 或年化归一。
+- **跨日负 CE**：`max_holding_bars=24` 允许约跨 2 日持有，部分标的隔夜 `cross_day_ce_mean` 为负，与 T+0 thesis 不符。
+
+### 11.3 文档索引（2026-07-29 更新）
+
+| 文档 | 内容 | 适用场景 |
+|------|------|----------|
+| `docs/CODEBASE_AND_QUANT_REVIEW.md` | 代码架构深度分析 + 回测数据实证 + 五维度量化改进建议（2026-07-29 综合审查） | 系统性改进规划、上线前评估 |
+| `docs/OPTIMIZATION_ANALYSIS.md` | 代码层静态审计（A/B/C/D 四区 12 项问题 + 8 个可执行实验） | 代码质量修复 |
+| `docs/BACKTEST_DATA_AND_QUANT_REVIEW.md` | 回测数据特征分析 + 8 项核心发现 + 量化建议 | 回测方法论修复 |
+| `docs/TECHNICAL_GUIDE.md`（本文档） | 运行手册 + 参数体系 + 模块架构 + 止损安全网 | 日常运行参考 |
+
+**已知文档不一致**：
+- `README.md` 引用 `docs/thin4_zombie_params_audit.md`，但该文件已并入 `OPTIMIZATION_ANALYSIS.md`，需更新 README 链接
+- "4 项规则投票"描述与代码实际三层结构（极值+确认+环境）不符，详见 `CODEBASE_AND_QUANT_REVIEW.md` §1.4 C 区
+- `exposure_policy.max_holding_bars=12` 与 `backtest.max_holding_bars=24` 存在两处不一致定义，运行实际取 12；统一前以运行参数为准

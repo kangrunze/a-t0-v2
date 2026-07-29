@@ -111,6 +111,9 @@ def adapt_params_by_frequency(
       - 5min: max_holding_bars=12（60 分钟）
       - 1min: max_holding_bars=60（60 分钟，与 5min 等价）
     同时同步更新 exposure_policy.max_holding_bars（approve_signal 用它判 expired）。
+
+    注意：yaml 中的 max_holding_bars 是趋势跟随默认值，会被此处按频率覆盖。
+    MR 模式的 mr_max_holding_bars 不受此处影响（通过 effective_max_holding_bars 独立决策）。
     """
     if frequency == "5min":
         # 预热 30 分钟: 1分钟用30根 → 5分钟用6根
@@ -123,6 +126,7 @@ def adapt_params_by_frequency(
         params.eod_check_bar_idx = 200
         params.max_holding_bars = 60   # 1min: 60 分钟（与 5min 等价时长）
     # 同步 exposure_policy（若已构造），保持 max_holding_bars 一致
+    # MR 模式用 effective_max_holding_bars（在 get_exposure_policy 中处理），此处只更新基础值
     if params.exposure_policy is not None:
         params.exposure_policy.max_holding_bars = params.max_holding_bars
     return params

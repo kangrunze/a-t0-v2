@@ -278,15 +278,19 @@ class TradeLifecycle:
         self,
         bar_idx: int,
         bar: dict,
-        stop_loss_ratio: float = 0.015,
-        trailing_ratio: float = 0.5,
+        stop_loss_ratio: float = 0.002,
+        trailing_ratio: float = 0.2,
         trailing_activation_pct: float = 0.0,
     ) -> list[TradeLeg]:
         """
         检查移动止损（移动止盈 + 固定止损兜底）。
 
+        默认值与 thresholds.yaml 的 backtest.stop_loss_ratio=0.002 / trailing_ratio=0.2 对齐。
+        调用方（backtest.py）通过 params.effective_stop_loss_ratio 传入实际值；
+        实盘 monitor 若直接调用且未传参，将使用此处的安全默认值。
+
         1. 浮盈达到激活门槛（max_favorable >= fill_price × trailing_activation_pct）：
-           从最高点回撤 trailing_ratio(0.5) 触发移动止盈，保住部分利润。
+           从最高点回撤 trailing_ratio 触发移动止盈，保住部分利润。
            盘中穿透即触发（bar.low/high），成交价 = 止损线。
         2. 未激活移动止盈：固定止损 max_adverse >= fill_price × stop_loss_ratio 防大亏。
 

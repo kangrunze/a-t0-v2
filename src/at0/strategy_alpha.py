@@ -18,7 +18,6 @@ P2 实现: 根据 P1 IC 报告, 保留 IC 显著的信号, 丢弃不显著的
 """
 from __future__ import annotations
 from typing import Optional
-import math
 
 
 def score_vwap(vwap_dev: float, atr: float = 0.0) -> float:

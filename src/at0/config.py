@@ -1,4 +1,4 @@
-﻿"""
+"""
 A-T0 配置加载器（config 层）
 =============================
 方案 v0.2 第八节："所有阈值集中配置，禁止散落在各脚本里硬编码"
@@ -166,6 +166,23 @@ def load_exposure_policy() -> ExposurePolicy:
         if hasattr(defaults, k):
             kwargs[k] = v
     return ExposurePolicy(**kwargs) if kwargs else defaults
+
+
+def load_market_thresholds() -> None:
+    """从 yaml market 段加载市场情绪分级阈值到 MarketSnapshot 类变量。
+
+    在 config 模块导入时自动调用一次，让 MarketSnapshot.market_sentiment
+    使用 yaml 配置的阈值而非硬编码默认值。
+    """
+    from .features import MarketSnapshot
+    data = _load_yaml()
+    if not data or "market" not in data:
+        return
+    MarketSnapshot.load_market_thresholds(data["market"])
+
+
+# 模块导入时自动加载市场情绪阈值
+load_market_thresholds()
 
 
 if __name__ == "__main__":
