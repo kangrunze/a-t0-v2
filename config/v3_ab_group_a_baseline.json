@@ -1,0 +1,6 @@
+{
+  "sp": {
+    "use_continuous_alpha": false,
+    "strategy_mode": "trend_following"
+  }
+}

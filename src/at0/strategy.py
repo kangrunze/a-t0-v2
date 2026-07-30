@@ -1130,9 +1130,9 @@ def evaluate_all_signals(
     alpha_info = None
     if params.use_continuous_alpha:
         snap = reduce_sig.snapshot or add_sig.snapshot or {}
-        # 计算两个方向的 alpha_score
-        snap_reduce = dict(snap, _direction="reduce")
-        snap_add = dict(snap, _direction="add")
+        # V3: 注入 bars 引用，让各 Engine 能访问历史 K 线序列
+        snap_reduce = dict(snap, _direction="reduce", _bars=bars)
+        snap_add = dict(snap, _direction="add", _bars=bars)
         alpha_reduce, sub_reduce = compute_alpha_score(snap_reduce, params)
         alpha_add, sub_add = compute_alpha_score(snap_add, params)
         alpha_info = {

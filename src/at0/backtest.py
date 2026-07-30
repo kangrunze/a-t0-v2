@@ -24,7 +24,7 @@ import itertools
 import json
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -43,13 +43,22 @@ from .risk import (
 from .execution import TradeLifecycle
 # P1: 测量层（主计划 S2.6 核心新增能力）
 from .strategy import compute_alpha_score
-from .measurement import (
-    compute_alpha_decay,
-    compute_trade_quality,
-    compute_stratified_report,
-    scan_param_landscape,
-    audit_cashflow,
-)
+# 容错导入（2026-07-30 Python 3.10→3.12 升级：measurement .pyc magic number 不匹配，
+# 缺失符号设为 None，import 不阻断；调用方运行时检查是否为 None）
+try:
+    from .measurement import (
+        compute_alpha_decay,
+        compute_trade_quality,
+        compute_stratified_report,
+        scan_param_landscape,
+        audit_cashflow,
+    )
+except ImportError:
+    compute_alpha_decay = None
+    compute_trade_quality = None
+    compute_stratified_report = None
+    scan_param_landscape = None
+    audit_cashflow = None
 
 
 # ═══ backtest: backtest_metrics（统计口径 + 汇总） ═══
@@ -374,17 +383,52 @@ class BacktestParams:
     mr_cooldown_bars: Optional[int] = None
     mr_max_t_size_ratio: Optional[float] = None
 
+    # ── Stage G2: 动态止损缩放（按个股振幅相对池子中位数）──
+    # 开关默认 False，不修改现有固定止损路径。
+    # 开启后 effective_stop_loss_ratio 调用 risk.dynamic_stop_loss 缩放 stop_loss_ratio。
+    # amplitude_table: {code: 60日日均振幅}，由调用方（回测脚本）预计算后注入。
+    # pool_median_amplitude: 池子所有股票振幅的中位数。
+    # min_scale/max_scale: 缩放倍数上下限，避免极端振幅导致不合理止损。
+    dynamic_stop_enabled: bool = False
+    amplitude_table: Optional[dict] = None      # {code: amplitude}
+    pool_median_amplitude: Optional[float] = None
+    dynamic_stop_min_scale: float = 0.5
+    dynamic_stop_max_scale: float = 2.0
+
+    # ── V3: Alpha 评分模式专属止损（2026-07-30）──
+    # alpha 评分模式下信号质量更高（胜率+2pp），但盈亏比下降（0.82 vs 1.43），
+    # 根因：固定 0.002 止损对 alpha 信号太紧，被噪音扫出。
+    # V3 模式给更宽的止损让趋势发展，同时提高阈值减少低质量信号。
+    # v3_alpha_stop_loss_ratio: None=不覆盖（用 stop_loss_ratio），float=覆盖值
+    v3_alpha_stop_loss_ratio: Optional[float] = None
+    # V3 专属移动止盈回撤比例（None=不覆盖）
+    v3_alpha_trailing_ratio: Optional[float] = None
+
     @property
     def is_mean_reversion(self) -> bool:
         """当前是否为均值回归模式。"""
         return self.signal_params.strategy_mode == "mean_reversion"
 
     @property
+    def is_v3_alpha(self) -> bool:
+        """当前是否为 V3 Alpha 评分模式。"""
+        return self.signal_params.use_continuous_alpha
+
+    @property
     def effective_stop_loss_ratio(self) -> float:
-        """止损比例：MR 模式且配置了 mr_stop_loss_ratio 时覆盖，否则用趋势跟随值。"""
+        """止损比例：MR/V3 模式有专属覆盖，否则用趋势跟随值。"""
         if self.is_mean_reversion and self.mr_stop_loss_ratio is not None:
             return self.mr_stop_loss_ratio
+        if self.is_v3_alpha and self.v3_alpha_stop_loss_ratio is not None:
+            return self.v3_alpha_stop_loss_ratio
         return self.stop_loss_ratio
+
+    @property
+    def effective_trailing_ratio(self) -> float:
+        """移动止盈回撤比例：V3 模式有专属覆盖，否则用趋势跟随值。"""
+        if self.is_v3_alpha and self.v3_alpha_trailing_ratio is not None:
+            return self.v3_alpha_trailing_ratio
+        return self.trailing_ratio
 
     @property
     def effective_max_holding_bars(self) -> int:
@@ -527,6 +571,22 @@ def backtest_single_day(
     """
     params = params or BacktestParams()
     cost_model = params.get_cost_model()
+
+    # Stage G2: 动态止损缩放（仅在 TF 模式 + dynamic_stop_enabled 时生效）
+    # MR 模式有自己的 mr_stop_loss_ratio 覆盖，不参与动态缩放
+    if params.dynamic_stop_enabled and not params.is_mean_reversion:
+        from .risk import dynamic_stop_loss
+        amp_table = params.amplitude_table or {}
+        stock_amp = amp_table.get(code)
+        if stock_amp is not None and params.pool_median_amplitude is not None:
+            scaled_sl = dynamic_stop_loss(
+                base_stop_loss=params.stop_loss_ratio,
+                stock_amplitude=stock_amp,
+                pool_median_amplitude=params.pool_median_amplitude,
+                min_scale=params.dynamic_stop_min_scale,
+                max_scale=params.dynamic_stop_max_scale,
+            )
+            params = replace(params, stop_loss_ratio=scaled_sl)
     exposure_policy = params.get_exposure_policy()
     bars_count = len(bars)
 
@@ -678,7 +738,11 @@ def backtest_single_day(
         # 未激活：固定止损 stop_loss_ratio 防大亏（参数化，见 BacktestParams/thresholds.yaml）
         # MR 模式禁用移动止盈：trailing 会抢先平仓，导致 MR 信号平仓(绝对价格止盈)无法触发
         # MR 模式只用固定止损防大亏，让 MR 信号平仓接管止盈逻辑
-        effective_trailing = 0.0 if params.is_mean_reversion else params.trailing_ratio
+        # V3 alpha 模式：使用 effective_trailing_ratio 支持专属覆盖
+        if params.is_mean_reversion:
+            effective_trailing = 0.0
+        else:
+            effective_trailing = params.effective_trailing_ratio
 
         # MR模式止损延迟激活（2026-07-29 修复）：
         # 根因：止损0.3%在1-2根K线内触发(占54%)，而MR止盈需3根K线+0.5%涨幅

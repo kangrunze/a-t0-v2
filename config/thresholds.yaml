@@ -45,12 +45,26 @@ signal:
   tf_kdj_reverse_bars: 2            # KDJ连续N根反向确认（平仓条件，防单根噪声）
   # ── P2: Alpha 连续评分开关（主计划 S2.3，默认关闭）──
   use_continuous_alpha: false        # flag=false 时行为与改造前逐笔一致
-  alpha_weight_vwap: 1.0             # Alpha 评分权重（等权起步）
+  alpha_weight_vwap: 1.0             # @deprecated 旧 5 维度权重（V3 改用 v3_alpha_weights）
   alpha_weight_rsi: 1.0
   alpha_weight_kdj: 1.0
   alpha_weight_adx: 1.0
   alpha_weight_volume: 1.0
   alpha_threshold_open: 60.0         # 连续评分模式开仓门槛
+
+  # ── V3: 七维度 Alpha 评分权重（G1 阶段，用户方案 §十二）──
+  # Trend 25% / Wave 20% / Support 15% / Momentum 15%
+  # Liquidity 10% / ExpectedMove 10% / Risk 5%
+  # G2-G7 各 Engine 实现后，对应维度子评分替换为 Engine 产出
+  # ExpectedMove 和 Risk 在 G5/G6 实现前，权重实际转移给 Trend（占位返回中性 50）
+  v3_alpha_weights:
+    trend: 0.25
+    wave: 0.20
+    support: 0.15
+    momentum: 0.15
+    liquidity: 0.10
+    expected_move: 0.10
+    risk: 0.05
 
   # ── Stage K: 均值回归模式（与趋势跟随互斥，手动选择）──
   # K0闸门：振幅筛选36只×3年，|vwap_dev|≥3%时回归概率55-64%且期望值为正
@@ -215,6 +229,13 @@ backtest:
   mr_max_holding_bars: 30          # 最大持仓30根（150分钟，配合0.8%止盈给充足回归时间）
   mr_max_t_size_ratio: 0.12        # 仓位12%（趋势跟随0.25更小）
   mr_cooldown_bars: 8              # 冷却8根（趋势跟随24更短）
+
+  # ── V3: Alpha 评分模式专属止损（2026-07-30）──
+  # alpha 评分模式下信号质量更高（胜率+2pp），但盈亏比下降（0.82 vs 1.43），
+  # 根因：固定 0.002 止损对 alpha 信号太紧，被噪音扫出。
+  # V3 模式给更宽的止损 0.004 让趋势发展，同时用更紧的 trailing 0.15 保护利润。
+  v3_alpha_stop_loss_ratio: 0.004   # V3 止损 0.4%（TF 的 2x，给 alpha 信号更多空间）
+  v3_alpha_trailing_ratio: 0.15     # V3 移动止盈回撤 15%（TF 的 0.2 更紧，保护利润）
 
 # ── P1: 测量层配置（主计划 S2.6 / S3）──
 measurement:

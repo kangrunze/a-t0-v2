@@ -543,6 +543,44 @@ DEFAULT_RISK_PARAMS = RiskParams()
 
 
 # ═══════════════════════════════════════════════════════════════
+# Stage G2: 动态止损缩放（按个股自身波动率的相对值）
+# ═══════════════════════════════════════════════════════════════
+# 设计：stop_loss_ratio(该股票) = base_stop_loss × (该股票振幅 / 池子振幅中位数)
+#   - base_stop_loss 用当前已验证的 0.002 作为缩放基准点
+#   - 振幅等于中位数的股票，缩放后止损值不变（等于回到固定值）
+#   - 缩放范围设上下限 min_scale/max_scale，避免极端振幅导致不合理止损
+#   - 通过 BacktestParams.dynamic_stop_enabled 开关控制（默认 False）
+# 验证：G2-2 在36只池子上做A/B，重点看高/低振幅组 avg_loss 差距是否缩小
+def dynamic_stop_loss(
+    base_stop_loss: float,
+    stock_amplitude: float,
+    pool_median_amplitude: float,
+    min_scale: float = 0.5,
+    max_scale: float = 2.0,
+) -> float:
+    """
+    按个股振幅相对池子中位数的倍数，缩放基准止损值。
+
+    参数:
+        base_stop_loss: 基准止损比例（如 0.002 = 0.2%）
+        stock_amplitude: 该股票60日日均振幅（如 0.06 = 6%）
+        pool_median_amplitude: 池子所有股票振幅的中位数
+        min_scale/max_scale: 缩放倍数上下限
+
+    返回:
+        缩放后的止损比例（与 base_stop_loss 同量纲）
+
+    异常:
+        pool_median_amplitude <= 0 时返回 base_stop_loss（安全兜底）
+    """
+    if pool_median_amplitude <= 0 or stock_amplitude <= 0:
+        return base_stop_loss
+    scale = stock_amplitude / pool_median_amplitude
+    scale = max(min_scale, min(max_scale, scale))
+    return base_stop_loss * scale
+
+
+# ═══════════════════════════════════════════════════════════════
 # 风控检查结果
 # ═══════════════════════════════════════════════════════════════
 @dataclass
