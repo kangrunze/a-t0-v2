@@ -167,9 +167,16 @@ class SignalParams:
     mr_z_threshold: float = 1.0              # z-score阈值（100只调参最优：1.5→1.0）
     mr_lookback_bars: int = 12               # 回看窗口（计算价格极值、衰竭确认）
     mr_vol_ratio_max: float = 1.5            # 量比上限：量比>此值视为趋势仍在加速（不触发均值回归）
-    # 平仓：基于开仓时偏离度的绝对回归目标（非实时z，避免VWAP漂移导致立即平仓）
-    mr_take_profit_reversion_ratio: float = 0.3  # 100只调参最优：0.5→0.3（更紧平仓）
-    mr_min_reversion: float = 0.001          # 最小回归幅度：|open_vwap_dev|-|当前vwap_dev| ≥ 此值才平仓（防立即平仓）
+    # 平仓：基于开仓价的绝对价格收益率止盈（2026-07-29 修复 VWAP 漂移导致买卖点接近问题）
+    # 旧实现用 vwap_dev 相对回归，VWAP 漂移会让平仓条件很快满足但价格几乎没动 → 净亏
+    # 新实现：价格相对开仓价涨/跌 ≥ mr_target_return 才平仓，真正实现低买高卖
+    mr_target_return: float = 0.003          # 绝对价格止盈激活阈值（0.3%，达到后激活移动止盈）
+    mr_min_holding_bars: int = 3             # 开仓后最小持仓K线数（防立即平仓，3根=15分钟）
+    mr_fatigue_rebound: float = 0.002        # 衰竭确认回升幅度：近N根极值与当前价差 ≥ 此值才算衰竭（0.2%）
+    mr_trailing_ratio: float = 0.3           # MR移动止盈回撤比例（激活后从最高点回撤此比例才平仓，0=固定止盈）
+    # ── 以下为废弃字段，保留兼容但不再使用（被 mr_target_return 替代）──
+    mr_take_profit_reversion_ratio: float = 0.3  # @deprecated 旧相对回归比例，VWAP漂移导致净亏
+    mr_min_reversion: float = 0.001          # @deprecated 旧最小回归幅度，0.1%远小于0.27%成本
 
 
 DEFAULT_PARAMS = SignalParams()
@@ -391,6 +398,8 @@ def evaluate_reduce_signal(
     open_vwap_dev: Optional[float] = None,
     frequency: str = "1min",
     holding_ratio: float = 0.0,
+    open_fill_price: Optional[float] = None,
+    holding_bars: int = 0,
 ) -> TSignal:
     """
     减仓信号评估（趋势跟随：下跌趋势中卖出开仓 / 趋势反转时平买仓）。
@@ -428,6 +437,8 @@ def evaluate_reduce_signal(
             is_for_pairing=is_for_pairing,
             filter_passed=filter_passed,
             open_vwap_dev=open_vwap_dev,
+            open_fill_price=open_fill_price,
+            holding_bars=holding_bars,
         )
         return mr_signal if mr_signal is not None else TSignal(direction="reduce")
 
@@ -605,17 +616,21 @@ def _evaluate_mean_reversion(
     is_for_pairing: bool,
     filter_passed: bool,
     open_vwap_dev: Optional[float] = None,
+    open_fill_price: Optional[float] = None,
+    holding_bars: int = 0,
 ) -> Optional[TSignal]:
     """均值回归信号评估。
 
     触发逻辑（开仓）：
       1. z-score = |vwap_dev| / (atr/vwap) ≥ mr_z_threshold
-      2. 衰竭确认：回看窗口内价格已从极端位回落（不再创新极值）
+      2. 衰竭确认：回看窗口内价格已从极端位回升/回落至少 mr_fatigue_rebound
       3. 量比不能太高（趋势仍在加速时不触发）
       4. 方向：vwap_dev<0 → 买入(add)；vwap_dev>0 → 卖出(reduce)
 
     平仓逻辑（is_for_pairing=True）：
-      z-score 回归到 mr_take_profit_z 以下（回到VWAP附近）
+      绝对价格止盈：价格相对开仓价涨/跌 ≥ mr_target_return
+      且持仓 ≥ mr_min_holding_bars（防开仓后立即平仓）
+      2026-07-29 修复：旧实现用 vwap_dev 相对回归，VWAP 漂移导致买卖点接近净亏
     """
     vwap_dev = snap.get("vwap_dev")
     atr = snap.get("atr")
@@ -636,25 +651,29 @@ def _evaluate_mean_reversion(
     z_str = f"{z_score:.2f}"
     vol_str = f"{vol_ratio:.2f}" if vol_ratio is not None else "N/A"
 
-    # ── 平仓分支：基于开仓时偏离度的绝对回归目标 ──
+    # ── 平仓分支：绝对价格止盈（修复 VWAP 漂移问题）──
     if is_for_pairing:
-        # 平仓条件：当前|vwap_dev| ≤ 开仓时|open_vwap_dev| × 回归比例
-        # 且至少回归了 mr_min_reversion 的绝对幅度（过滤开仓后立即平仓）
-        if open_vwap_dev is None or open_vwap_dev == 0:
-            # 没有开仓基准，不触发平仓
+        if open_fill_price is None or open_fill_price <= 0:
+            # 没有开仓基准价，不触发平仓
             return TSignal(
                 direction=direction, signal_source="mean_reversion",
                 price=price, snapshot=snap,
             )
-        open_abs = abs(open_vwap_dev)
-        curr_abs = abs(vwap_dev)
-        reversion_amount = open_abs - curr_abs  # 正=已回归
-        target = open_abs * params.mr_take_profit_reversion_ratio
-        near_vwap = curr_abs <= target and reversion_amount >= params.mr_min_reversion
+        # 绝对价格收益率：买入侧需价格上涨，卖出侧需价格下跌
+        if direction == "add":
+            price_return = (price - open_fill_price) / open_fill_price
+        else:
+            price_return = (open_fill_price - price) / open_fill_price
+        # 最小持仓检查
+        holding_ok = holding_bars >= params.mr_min_holding_bars
+        # 止盈条件：绝对收益达标 且 持仓时间达标
+        take_profit = price_return >= params.mr_target_return
+        near_vwap = take_profit and holding_ok
         fired = [
-            f"[MR平仓] 开仓偏离{open_vwap_dev*100:+.2f}% → 当前{vwap_dev*100:+.2f}%",
-            f"  回归{reversion_amount*100:.2f}% 目标{target*100:.2f}% "
-            f"({'达到' if near_vwap else '未达'}，需≥{params.mr_min_reversion*100:.1f}%)",
+            f"[MR平仓] 开仓价{open_fill_price:.4f} → 当前{price:.4f}",
+            f"  绝对收益{price_return*100:+.2f}% 目标{params.mr_target_return*100:.1f}% "
+            f"({'达到' if take_profit else '未达'})",
+            f"  持仓{holding_bars}根 {'≥' if holding_ok else '<'} {params.mr_min_holding_bars}根",
         ]
         return TSignal(
             direction=direction,
@@ -693,22 +712,28 @@ def _evaluate_mean_reversion(
     else:
         return None  # z不达标直接返回，不继续评估
 
-    # 条件2：衰竭确认（回看窗口内价格已从极端位回落）
+    # 条件2：衰竭确认（回看窗口内价格已从极端位明显回升/回落）
+    # 2026-07-29 加强：旧实现只要求"最低价<当前价"(1根即可)，容易接飞刀
+    # 新实现：要求回升幅度 ≥ mr_fatigue_rebound (0.2%)，过滤下跌途中假衰竭
     lookback = params.mr_lookback_bars
     recent_bars = bars[-lookback:] if len(bars) >= lookback else bars
     if direction == "add":
-        # 买入侧：价格在VWAP下方，回看窗口内最低价 < 当前价（已从最低点回升）
+        # 买入侧：价格在VWAP下方，回看窗口内最低价需明显低于当前价（已从低点回升≥mr_fatigue_rebound）
         recent_low = min((float(b.get("low", 0)) for b in recent_bars), default=0)
-        fatigue_ok = recent_low < price and recent_low > 0
+        rebound_pct = (price - recent_low) / price if price > 0 else 0
+        fatigue_ok = recent_low > 0 and rebound_pct >= params.mr_fatigue_rebound
         if fatigue_ok:
-            fired.append(f"[MR衰竭] 近{lookback}根最低{recent_low:.2f} < 当前{price:.2f}（已从低点回升）")
+            fired.append(f"[MR衰竭] 近{lookback}根最低{recent_low:.2f} → 当前{price:.2f} "
+                         f"(回升{rebound_pct*100:.2f}% ≥ {params.mr_fatigue_rebound*100:.1f}%)")
             score += 1
     else:
-        # 卖出侧：价格在VWAP上方，回看窗口内最高价 > 当前价（已从高点回落）
+        # 卖出侧：价格在VWAP上方，回看窗口内最高价需明显高于当前价（已从高点回落≥mr_fatigue_rebound）
         recent_high = max((float(b.get("high", 0)) for b in recent_bars), default=0)
-        fatigue_ok = recent_high > price and recent_high > 0
+        drop_pct = (recent_high - price) / price if price > 0 else 0
+        fatigue_ok = recent_high > 0 and drop_pct >= params.mr_fatigue_rebound
         if fatigue_ok:
-            fired.append(f"[MR衰竭] 近{lookback}根最高{recent_high:.2f} > 当前{price:.2f}（已从高点回落）")
+            fired.append(f"[MR衰竭] 近{lookback}根最高{recent_high:.2f} → 当前{price:.2f} "
+                         f"(回落{drop_pct*100:.2f}% ≥ {params.mr_fatigue_rebound*100:.1f}%)")
             score += 1
 
     # 条件3：量比不能太高（趋势仍在加速时不触发均值回归）
@@ -764,6 +789,8 @@ def evaluate_add_signal(
     open_vwap_dev: Optional[float] = None,
     frequency: str = "1min",
     holding_ratio: float = 0.0,
+    open_fill_price: Optional[float] = None,
+    holding_bars: int = 0,
 ) -> TSignal:
     """
     加仓/买回信号评估（趋势跟随：上涨趋势中买入开仓 / 趋势反转时平卖仓）。
@@ -800,6 +827,8 @@ def evaluate_add_signal(
             is_for_pairing=is_for_pairing,
             filter_passed=filter_passed,
             open_vwap_dev=open_vwap_dev,
+            open_fill_price=open_fill_price,
+            holding_bars=holding_bars,
         )
         return mr_signal if mr_signal is not None else TSignal(direction="add")
 

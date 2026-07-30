@@ -575,17 +575,162 @@ def backtest_single_day(
         price = bar["close"]
 
         # P0-2: 更新持仓时长和最大偏移（方案C2：传盘中极值，max_adverse 用 low/high）
-        state.lifecycle.update_holding(i, price, bar.get("low"), bar.get("high"))
+        # MR模式改用收盘价口径（2026-07-29 修复）：
+        #   5min K线盘中噪声0.3%极常见，盘中极值止损导致33%交易max_favorable=0
+        #   （开仓后价格从未向有利方向移动即被盘中低点扫损）
+        #   MR策略持仓短(3-10根)，应用收盘价判断止损，让价格有完整K线回归
+        if params.is_mean_reversion:
+            state.lifecycle.update_holding(i, price, None, None)
+        else:
+            state.lifecycle.update_holding(i, price, bar.get("low"), bar.get("high"))
+
+        # ── MR 模式:移动止盈优先于止损 ──
+        # 2026-07-29 v19: 固定止盈→移动止盈
+        #   旧实现(v17): 价格达到0.8%立即止盈，首波拉升即平仓，错过后续更高点
+        #   新实现(v19): 价格达到0.8%后激活移动止盈，从最高点回撤mr_trailing_ratio才平仓
+        #   机制：mr_target_return是激活阈值而非平仓阈值，激活后跟踪max_favorable
+        #         当 price 从 max_favorable 回撤 mr_trailing_ratio 时才平仓
+        #   v19fix: 用max_favorable判断是否曾激活，避免价格回落到0.8%以下时停止检查
+        if params.is_mean_reversion and state.lifecycle.open_legs:
+            mr_tp_legs = []
+            mr_trailing = params.signal_params.mr_trailing_ratio
+            for leg in state.lifecycle.open_legs:
+                # 最小持仓检查
+                if leg.holding_bars < params.signal_params.mr_min_holding_bars:
+                    continue
+                # 绝对价格收益率
+                if leg.direction == "buy":
+                    pr = (price - leg.fill_price) / leg.fill_price
+                else:
+                    pr = (leg.fill_price - price) / leg.fill_price
+                # 历史最大收益率（用max_favorable判断是否曾达到激活阈值）
+                max_pr = leg.max_favorable / leg.fill_price if leg.fill_price > 0 else 0
+                # 是否曾达到激活阈值
+                activated = max_pr >= params.signal_params.mr_target_return
+                if not activated:
+                    continue  # 从未达到激活阈值，不平仓
+                # 已激活，检查移动止盈
+                if mr_trailing <= 0:
+                    # 无移动止盈，立即平仓（v17行为）
+                    mr_tp_legs.append((leg, pr))
+                    continue
+                # 计算从最大有利偏移的回撤
+                if max_pr > 0:
+                    pullback = (max_pr - pr) / max_pr
+                else:
+                    pullback = 0
+                # 回撤达到 mr_trailing_ratio 才平仓
+                if pullback >= mr_trailing:
+                    mr_tp_legs.append((leg, pr))
+            # 执行 MR 止盈平仓(用当前 bar.close 成交)
+            for tp_leg, pr in mr_tp_legs:
+                close_dir = "sell" if tp_leg.direction == "buy" else "buy"
+                tp_fill = price  # MR 止盈用当前收盘价成交
+                if tp_leg.direction == "buy":
+                    tp_real_pnl = (tp_fill - tp_leg.fill_price) * tp_leg.shares
+                else:
+                    tp_real_pnl = (tp_leg.fill_price - tp_fill) * tp_leg.shares
+                # 标记腿为已平仓
+                from at0.execution import LegStatus
+                tp_leg.status = LegStatus.PAIRED
+                tp_leg.expire_bar_idx = i
+                tp_leg.stop_fill_price = tp_fill
+                tp_leg.paired_pnl = tp_real_pnl
+                # 从 open_legs 移除
+                state.lifecycle.open_legs.remove(tp_leg)
+                # 追加 trade record
+                state.trades.append({
+                    "time": bar.get("time", ""),
+                    "date": trading_date,
+                    "direction": close_dir,
+                    "shares": tp_leg.shares,
+                    "fill_price": round(tp_fill, 4),
+                    "cost": 0.0,
+                    "pnl": round(tp_real_pnl, 4),
+                    "paired": True,
+                    "holding_bars": tp_leg.holding_bars,
+                    "status": "mr_take_profit",
+                })
+                state.cost_reduction += tp_real_pnl
+                if close_dir == "buy":
+                    state.net_position_delta += tp_leg.shares
+                    if tp_leg.fill_date == trading_date:
+                        state.locked_shares += tp_leg.shares
+                else:
+                    state.net_position_delta -= tp_leg.shares
+                    if tp_leg.fill_date == trading_date:
+                        state.locked_shares = max(0, state.locked_shares - tp_leg.shares)
+                state.risk_events.append({
+                    "type": "mr_take_profit",
+                    "direction": tp_leg.direction,
+                    "shares": tp_leg.shares,
+                    "fill_price": tp_leg.fill_price,
+                    "holding_bars": tp_leg.holding_bars,
+                    "bar_idx": i,
+                    "time": bar.get("time", ""),
+                    "tp_price": tp_fill,
+                    "realized_pnl": round(tp_real_pnl, 2),
+                    "price_return": round(pr, 4),
+                })
 
         # 移动止损（移动止盈+固定止损兜底，在 check_expiry 之前优先平仓）
         # 浮盈达激活门槛：从最高点回撤 trailing_ratio 触发移动止盈
         # 未激活：固定止损 stop_loss_ratio 防大亏（参数化，见 BacktestParams/thresholds.yaml）
+        # MR 模式禁用移动止盈：trailing 会抢先平仓，导致 MR 信号平仓(绝对价格止盈)无法触发
+        # MR 模式只用固定止损防大亏，让 MR 信号平仓接管止盈逻辑
+        effective_trailing = 0.0 if params.is_mean_reversion else params.trailing_ratio
+
+        # MR模式止损延迟激活（2026-07-29 修复）：
+        # 根因：止损0.3%在1-2根K线内触发(占54%)，而MR止盈需3根K线+0.5%涨幅
+        #       止损/止盈不对称导致84%交易被止损扫出，胜率仅7.6%
+        # 修复：前 mr_min_holding_bars 根K线不触发常规止损，给价格回归时间
+        #       但保留 mr_hard_stop_ratio(2%) 硬止损兜底，防接飞刀大亏
+        deferred_legs = []
+        if params.is_mean_reversion:
+            mr_min_hb = params.signal_params.mr_min_holding_bars
+            deferred_legs = [leg for leg in state.lifecycle.open_legs if leg.holding_bars < mr_min_hb]
+            if deferred_legs:
+                state.lifecycle.open_legs = [leg for leg in state.lifecycle.open_legs if leg.holding_bars >= mr_min_hb]
+
         stopped_legs = state.lifecycle.check_stop_loss(
             i, bar,
             stop_loss_ratio=params.effective_stop_loss_ratio,
-            trailing_ratio=params.trailing_ratio,
+            trailing_ratio=effective_trailing,
             trailing_activation_pct=params.trailing_activation_pct,
         )
+
+        # MR模式：对延迟腿检查硬止损（2%兜底，防极端亏损）
+        if params.is_mean_reversion and deferred_legs:
+            from at0.execution import LegStatus
+            mr_hard_stop = 0.02
+            bar_low = bar.get("low")
+            bar_high = bar.get("high")
+            for leg in deferred_legs:
+                threshold = abs(leg.fill_price) * mr_hard_stop
+                hit = False
+                # 盘中穿透即触发
+                if leg.direction == "buy" and bar_low is not None:
+                    if (leg.fill_price - bar_low) >= threshold:
+                        hit = True
+                elif leg.direction == "sell" and bar_high is not None:
+                    if (bar_high - leg.fill_price) >= threshold:
+                        hit = True
+                if hit:
+                    leg.status = LegStatus.STOPPED
+                    leg.expire_bar_idx = i
+                    if leg.direction == "buy":
+                        stop_fill = leg.fill_price - threshold
+                        stop_pnl = (stop_fill - leg.fill_price) * leg.shares
+                    else:
+                        stop_fill = leg.fill_price + threshold
+                        stop_pnl = (leg.fill_price - stop_fill) * leg.shares
+                    leg.stop_fill_price = stop_fill
+                    leg.paired_pnl = stop_pnl
+                    state.lifecycle.closed_legs.append(leg)
+                    stopped_legs.append(leg)
+                else:
+                    # 未触发硬止损，放回 open_legs 等待后续回归
+                    state.lifecycle.open_legs.append(leg)
         for stp_leg in stopped_legs:
             close_dir = "sell" if stp_leg.direction == "buy" else "buy"
             stop_fill = stp_leg.stop_fill_price
@@ -682,15 +827,22 @@ def backtest_single_day(
         has_buy_open = any(leg.direction == "buy" for leg in state.lifecycle.open_legs)
         has_sell_open = any(leg.direction == "sell" for leg in state.lifecycle.open_legs)
 
-        # 方案C1 + 方案B：取 FIFO 队首待平仓腿的 open_vwap_dev 和 holding_ratio
+        # 方案C1 + 方案B：取 FIFO 队首待平仓腿的 open_vwap_dev / fill_price / holding_bars / holding_ratio
+        # MR 模式新增 fill_price 和 holding_bars（绝对价格止盈 + 最小持仓判断）
         buy_open_vwap_dev = None
         sell_open_vwap_dev = None
+        buy_open_fill_price = None
+        sell_open_fill_price = None
+        buy_holding_bars = 0
+        sell_holding_bars = 0
         buy_holding_ratio = 0.0
         sell_holding_ratio = 0.0
         if has_buy_open:
             for leg in state.lifecycle.open_legs:
                 if leg.direction == "buy":
                     buy_open_vwap_dev = leg.open_vwap_dev
+                    buy_open_fill_price = leg.fill_price
+                    buy_holding_bars = leg.holding_bars
                     buy_holding_ratio = (leg.holding_bars / params.effective_max_holding_bars
                                          if params.effective_max_holding_bars > 0 else 0.0)
                     break
@@ -698,6 +850,8 @@ def backtest_single_day(
             for leg in state.lifecycle.open_legs:
                 if leg.direction == "sell":
                     sell_open_vwap_dev = leg.open_vwap_dev
+                    sell_open_fill_price = leg.fill_price
+                    sell_holding_bars = leg.holding_bars
                     sell_holding_ratio = (leg.holding_bars / params.effective_max_holding_bars
                                           if params.effective_max_holding_bars > 0 else 0.0)
                     break
@@ -713,6 +867,8 @@ def backtest_single_day(
             open_vwap_dev=buy_open_vwap_dev if has_buy_open else None,
             frequency=frequency,  # P0-6
             holding_ratio=buy_holding_ratio,  # 方案B
+            open_fill_price=buy_open_fill_price if has_buy_open else None,  # MR 绝对价格止盈
+            holding_bars=buy_holding_bars,  # MR 最小持仓判断
         )
         add_sig = evaluate_add_signal(
             bars_up_to_now,
@@ -725,6 +881,8 @@ def backtest_single_day(
             open_vwap_dev=sell_open_vwap_dev if has_sell_open else None,
             frequency=frequency,  # P0-6
             holding_ratio=sell_holding_ratio,  # 方案B
+            open_fill_price=sell_open_fill_price if has_sell_open else None,  # MR 绝对价格止盈
+            holding_bars=sell_holding_bars,  # MR 最小持仓判断
         )
 
         reduce_ok = reduce_sig.triggered and not is_limit_up_locked
