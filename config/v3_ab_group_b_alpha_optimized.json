@@ -1,0 +1,11 @@
+{
+  "sp": {
+    "use_continuous_alpha": true,
+    "strategy_mode": "trend_following",
+    "alpha_threshold_open": 72.0
+  },
+  "bp": {
+    "v3_alpha_stop_loss_ratio": 0.004,
+    "v3_alpha_trailing_ratio": 0.25
+  }
+}

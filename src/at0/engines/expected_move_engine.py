@@ -102,6 +102,49 @@ class ExpectedMoveEngine(BaseEngine):
 
         return max(0.0, min(100.0, score))
 
+    def compute_rr(
+        self,
+        bars: list[dict],
+        snap: dict,
+        direction: str = "reduce",
+    ) -> Optional[float]:
+        """计算 Expected Move 的 RR 值（供 V4 L4 开仓闸门使用）。
+
+        统一用 ATR 作为 risk 基准，与用户方案"EM >= 1.5×ATR"对齐：
+            reward = |预期收益率| × price（绝对价格预期移动）
+            risk   = ATR（当前波动）
+            RR     = reward / ATR
+
+        RR >= 1.5 即 EM >= 1.5×ATR；L4 闸门默认阈值 2.5（更严格）。
+
+        预期收益率来源：
+          1. 优先 Qlib 预测（predicted_return）
+          2. 降级统计外推：最近 6 根 K 线 ROC
+
+        :return: RR 值；None 表示数据不足无法计算（闸门应放行，避免误杀）
+        """
+        price = snap.get("current_price")
+        atr = snap.get("atr")
+        if price is None or atr is None or price <= 0 or atr <= 0:
+            return None
+
+        # 预期收益率：优先 Qlib 预测
+        predicted_return = self._get_qlib_prediction(snap)
+        if predicted_return is not None:
+            expected_return = abs(predicted_return)
+        else:
+            # 降级统计外推：最近 6 根 K 线的 ROC
+            if len(bars) < 7:
+                return None
+            closes = [b.get("close", 0) for b in bars]
+            if closes[-7] <= 0:
+                return None
+            roc_6 = (closes[-1] - closes[-7]) / closes[-7]
+            expected_return = abs(roc_6)
+
+        reward = expected_return * price
+        return reward / atr
+
     def _get_qlib_prediction(self, snap: dict) -> Optional[float]:
         """从 Qlib 预测缓存中获取当前 bar 的预测值。"""
         if self._qlib_predictions is None:

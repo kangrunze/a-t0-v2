@@ -281,6 +281,7 @@ class TradeLifecycle:
         stop_loss_ratio: float = 0.002,
         trailing_ratio: float = 0.2,
         trailing_activation_pct: float = 0.0,
+        atr_trailing_distance: Optional[float] = None,
     ) -> list[TradeLeg]:
         """
         检查移动止损（移动止盈 + 固定止损兜底）。
@@ -290,27 +291,25 @@ class TradeLifecycle:
         实盘 monitor 若直接调用且未传参，将使用此处的安全默认值。
 
         1. 浮盈达到激活门槛（max_favorable >= fill_price × trailing_activation_pct）：
-           从最高点回撤 trailing_ratio 触发移动止盈，保住部分利润。
+           从最高点回撤触发移动止盈，保住部分利润。
            盘中穿透即触发（bar.low/high），成交价 = 止损线。
         2. 未激活移动止盈：固定止损 max_adverse >= fill_price × stop_loss_ratio 防大亏。
 
-        v4实验（分离止盈止损，trailing=0）失败：平仓信号在5min不可靠触发，
-        盈利腿变超时/止损，胜率从82%暴跌到36%。故恢复移动止盈。
-
-        2026-07-24 修复"小赚多次大亏几次"：原逻辑 max_favorable > 0（1 tick 盈利）
-        即激活移动止盈 → 微利立即被扫出（avg_win≈0.3%），而亏损腿跑满固定止损
-        1.5%（avg_loss≈1.5%），payoff_ratio 仅 0.21。新增 trailing_activation_pct
-        激活门槛：浮盈不足门槛时不启用移动止盈，让盈利腿发展；同时建议收紧
-        stop_loss_ratio 使亏损与盈利同量级。activation_pct=0 时保持旧行为。
+        V4 ATR 自适应（2026-07-30）：
+        atr_trailing_distance 不为 None 且 > 0 时，trailing 距离改用 ATR 绝对值
+        而非利润回撤比例。stop_line = peak_price ∓ atr_trailing_distance。
+        高波动自动放宽（避免噪声扫损），低波动自动收紧（锁住利润）。
 
         :param bar_idx: 当前 K 线索引
         :param bar: 当前 K 线（需含 low/high）
         :param stop_loss_ratio: 固定止损比例（默认 1.5%，移动止盈未激活时生效）
         :param trailing_ratio: 移动止盈回撤比例（默认 0.5，从最高点回撤50%触发）
         :param trailing_activation_pct: 移动止盈激活门槛（浮盈比例，0=有盈利即激活，兼容旧行为）
+        :param atr_trailing_distance: ATR 自适应 trailing 绝对距离（None=用 trailing_ratio 比例模式）
         :return: 本次止损的腿列表
         """
-        if stop_loss_ratio <= 0 and trailing_ratio <= 0:
+        has_atr_trailing = atr_trailing_distance is not None and atr_trailing_distance > 0
+        if stop_loss_ratio <= 0 and trailing_ratio <= 0 and not has_atr_trailing:
             return []
         stopped = []
         remaining_open = []
@@ -323,25 +322,42 @@ class TradeLifecycle:
 
             # 移动止盈激活判断：浮盈须达到 fill_price × trailing_activation_pct
             # activation_pct=0 时退化为旧行为（有任意盈利即激活）
+            # ATR 模式也用同一激活逻辑
             trailing_armed = (
-                trailing_ratio > 0
+                (trailing_ratio > 0 or has_atr_trailing)
                 and leg.max_favorable > 0
                 and leg.max_favorable >= abs(leg.fill_price) * trailing_activation_pct
             )
 
             if trailing_armed:
-                # 移动止损：从最大有利偏移回撤超过 trailing_ratio
-                retained = leg.max_favorable * (1 - trailing_ratio)
-                if leg.direction == "buy":
-                    stop_line = leg.fill_price + retained
-                    if bar_low is not None and bar_low <= stop_line:
-                        should_stop = True
-                        stop_fill = stop_line
-                else:  # sell
-                    stop_line = leg.fill_price - retained
-                    if bar_high is not None and bar_high >= stop_line:
-                        should_stop = True
-                        stop_fill = stop_line
+                if has_atr_trailing:
+                    # V4 ATR 自适应：trailing 距离 = ATR × multiplier（绝对值）
+                    # peak_price = fill_price + max_favorable (buy) / fill_price - max_favorable (sell)
+                    if leg.direction == "buy":
+                        peak_price = leg.fill_price + leg.max_favorable
+                        stop_line = peak_price - atr_trailing_distance
+                        if bar_low is not None and bar_low <= stop_line:
+                            should_stop = True
+                            stop_fill = stop_line
+                    else:  # sell
+                        peak_price = leg.fill_price - leg.max_favorable
+                        stop_line = peak_price + atr_trailing_distance
+                        if bar_high is not None and bar_high >= stop_line:
+                            should_stop = True
+                            stop_fill = stop_line
+                else:
+                    # 比例模式：从最大有利偏移回撤超过 trailing_ratio
+                    retained = leg.max_favorable * (1 - trailing_ratio)
+                    if leg.direction == "buy":
+                        stop_line = leg.fill_price + retained
+                        if bar_low is not None and bar_low <= stop_line:
+                            should_stop = True
+                            stop_fill = stop_line
+                    else:  # sell
+                        stop_line = leg.fill_price - retained
+                        if bar_high is not None and bar_high >= stop_line:
+                            should_stop = True
+                            stop_fill = stop_line
             else:
                 # 固定止损：移动止盈未激活时防大亏
                 threshold = abs(leg.fill_price) * stop_loss_ratio

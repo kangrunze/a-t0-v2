@@ -43,14 +43,24 @@ signal:
   tf_trend_reverse_adx: 28.0        # ADX<此值视为趋势减弱（平仓条件）
   tf_vwap_cross_threshold: 0.002    # |VWAP偏离| < 此值视为VWAP穿越（平仓条件，0.2%）
   tf_kdj_reverse_bars: 2            # KDJ连续N根反向确认（平仓条件，防单根噪声）
-  # ── P2: Alpha 连续评分开关（主计划 S2.3，默认关闭）──
-  use_continuous_alpha: false        # flag=false 时行为与改造前逐笔一致
+  # ── P2: Alpha 连续评分开关（主计划 S2.3）──
+  # 2026-07-30：V3 Alpha 正式设为默认策略模式，不再使用 TF/MR
+  # 100股×1年验证最优参数（sl2配置）：
+  #   th=72, sl=0.002, tr=0.25 → 净盈亏+191K, 胜率73.5%, payoff1.42, 盈利79/100
+  #   对比 TF baseline: 净盈亏+445K 但结构性依赖规则驱动
+  #   对比 MR v17 ADX30: 净盈亏+369K 但成本占比29.4%
+  # V3 Alpha 优势：七维度Engine评分过滤低质量信号，payoff1.42为所有策略最高
+  use_continuous_alpha: true         # V3 Alpha 评分模式（七维度 Engine 评分替代布尔触发）
   alpha_weight_vwap: 1.0             # @deprecated 旧 5 维度权重（V3 改用 v3_alpha_weights）
   alpha_weight_rsi: 1.0
   alpha_weight_kdj: 1.0
   alpha_weight_adx: 1.0
   alpha_weight_volume: 1.0
-  alpha_threshold_open: 60.0         # 连续评分模式开仓门槛
+  alpha_threshold_open: 72.0         # V3 开仓门槛（100股×1年验证最优：60→72，胜率+5pp）
+  # V3 平仓门槛（2026-07-30 修复"买卖点过近"问题）
+  # 旧实现：平仓=开仓=72，开仓后1-2根K线对向alpha易达72，导致5分钟内买卖，捕捉不到完整波段
+  # 新实现：平仓85 >> 开仓72，只有极强反转才信号平仓，让趋势发展，trailing为主平仓机制
+  v3_alpha_close_threshold: 85.0     # 平仓阈值（85 >> 开仓72，让趋势发展）
 
   # ── V3: 七维度 Alpha 评分权重（G1 阶段，用户方案 §十二）──
   # Trend 25% / Wave 20% / Support 15% / Momentum 15%
@@ -65,6 +75,63 @@ signal:
     liquidity: 0.10
     expected_move: 0.10
     risk: 0.05
+
+  # ── V4: L4 Expected Move 开仓闸门（Decision Engine，2026-07-30）──
+  # 用户方案：Alpha 已够用，瓶颈在 Exit。L4 作为开仓闸门防"买晚"：
+  #   alpha_score >= alpha_threshold_open 后，额外检查 Expected Move RR
+  #   RR = |预期收益| / ATR（剩余空间 vs 当前波动），RR < 阈值拒绝开仓
+  #   机制：Alpha=95 但剩余空间只有 0.4% 时放弃，自然拉远买卖点距离
+  #
+  # 100股×1年 RR 阈值扫描定标（2026-07-30）：
+  #   RR≥1.5: 净盈亏-2.0%, Payoff1.41(持平), 交易-8%  → 太松，无增益
+  #   RR≥2.0: 净盈亏-3.2%, Payoff1.56(+9.9%), 交易-20% → 最优平衡点★
+  #   RR≥2.5: 净盈亏-21.5%, Payoff1.51, 交易-35%      → 太严，伤净盈亏
+  # RR≥2.0 同时实现：Payoff最优/成本效率最优(23.10%)/每笔期望+21.1%/盈利股86(+8.9%)
+  # dataclass默认False（安全兜底），yaml设为true启用
+  expected_move_gate_enabled: true       # L4 闸门开关
+  expected_move_rr_min: 2.0              # RR >= 2.0 才允许开仓（100股扫描最优）
+
+  # ── V4: L6 HoldConfidence + L7 TrendFailure 退出引擎（Decision Engine，2026-07-30）──
+  # 用户方案：瓶颈在 Exit。Trailing 切香肠（持15min vs 主趋势60min）。
+  # L6/L7 替代 Trailing：锚定趋势状态退出，NOT 盈亏回撤。
+  #   L6: 每根K线重打分（EMA斜率30%+ADX25%+价格EMA20关系20%+MACD15%+量能10%）
+  #       信心 < hold_confidence_exit_threshold 退出
+  #   L7: 趋势硬失败（EMA20破位+ADX<25+MACD反转+量能枯竭，2+信号退出）
+  #
+  # 100股×1年 A/B 验证结论（2026-07-30，5组对比）：
+  #   baseline(全关):     净+134,119  Payoff2.29  每笔+148.86  avg_loss-120.72
+  #   L4 only(最优):      净+132,118  Payoff2.55  每笔+175.46  avg_loss-117.65
+  #   L4+L6(th70)/L7:     净+119,832  Payoff2.14  每笔+155.63  avg_loss-138.71
+  #   L4+L6(th50)/L7:     净+119,655  Payoff2.13  每笔+155.60  avg_loss-139.85
+  #   L4+L7 only(th=0):   净+122,013  Payoff2.19  每笔+159.29  avg_loss-135.74
+  # 结论：L6/L7 在所有参数下都伤害性能。核心问题：L6/L7 趋势状态退出系统性增大
+  #   avg_loss（-120→-136~-140），与 V3 Alpha "高频小赚"模式冲突。
+  #   V3 Alpha 依赖 trailing 精确止盈保护，L6/L7 提前退出导致亏损放大。
+  # 决定：禁用 L6/L7，保留 L4 only 作为新基线。改用 ATR 自适应 Trailing 改进退出。
+  # dataclass默认False（安全兜底），yaml设为false（验证后禁用）
+  hold_confidence_exit_enabled: false    # L6/L7 退出引擎开关（验证后禁用）
+  hold_confidence_exit_threshold: 70.0   # 信心 < 70 退出（0-100，越低越宽松）
+
+  # ── V4: 趋势自适应 Trailing（Decision Engine，2026-07-30）──
+  # 用户方案：Trailing = ATR × TrendScore（强趋势50%，弱趋势20%）
+  # 实现：根据 ADX 调整 trailing_ratio（保持比例模型 trailing_distance = max_favorable × ratio）
+  #   强趋势(ADX≥35): trailing_ratio=0.50（宽，让趋势跑，vs baseline 0.25）
+  #   中趋势(25≤ADX<35): trailing_ratio=0.35
+  #   弱趋势(ADX<25): trailing_ratio=0.20（紧，锁利润，vs baseline 0.25）
+  #
+  # 100股×1年 A/B 验证结论（2026-07-30，3组对比）：
+  #   L4 only baseline:    净+132,118  Payoff2.55  avg_win+300.27  ← 最优
+  #   conservative(35/25/20): 净+109,867  Payoff2.23  avg_win+262.30  (-16.8%)
+  #   balanced(40/30/15):    净+98,136   Payoff2.06  avg_win+242.28  (-25.7%)
+  #   aggressive(50/35/20):  净+75,280   Payoff1.73  avg_win+203.28  (-43.0%)
+  # 结论：趋势自适应只影响盈利腿的 avg_win（随ratio变宽单调下降），
+  #   不影响胜率/交易笔数/avg_loss。V3 Alpha 的 trailing_ratio=0.25 已是最优。
+  # 决定：禁用趋势自适应 Trailing，保持固定 trailing_ratio=0.25。
+  # dataclass默认False（安全兜底），yaml设为false（验证后禁用）
+  atr_adaptive_trailing_enabled: false     # 趋势自适应 Trailing 开关（验证后禁用）
+  atr_trailing_strong: 0.50              # 强趋势 trailing_ratio（ADX≥35，让趋势跑）
+  atr_trailing_medium: 0.35              # 中趋势 trailing_ratio（25≤ADX<35）
+  atr_trailing_weak: 0.20               # 弱趋势 trailing_ratio（ADX<25，锁利润）
 
   # ── Stage K: 均值回归模式（与趋势跟随互斥，手动选择）──
   # K0闸门：振幅筛选36只×3年，|vwap_dev|≥3%时回归概率55-64%且期望值为正
@@ -91,7 +158,7 @@ signal:
   #   单笔均盈+107.71 单笔均亏-15.47 毛利润+47,733 成本15,203
   #   机制：MR信号在极值开仓，等待0.8%回归止盈（持仓42分钟），否则快速止损0.1%
   #         低胜率(18%)高盈亏比(7:1)→每笔期望+4.9元，买卖点距离充分
-  strategy_mode: mean_reversion        # trend_following（默认）| mean_reversion
+  strategy_mode: trend_following      # V3 Alpha模式（use_continuous_alpha=true时走七维度评分）
   mr_z_threshold: 1.0               # z-score触发阈值（v9验证：z=1.5更差，保持1.0）
   mr_lookback_bars: 12              # 回看窗口（计算价格极值、衰竭确认）
   mr_target_return: 0.008           # 绝对价格止盈阈值（0.8%，v17验证最优，v19移动止盈更差）
@@ -99,6 +166,14 @@ signal:
   mr_fatigue_rebound: 0.002         # 衰竭确认回升幅度（0.2%，v18验证0.1%对买入点无改善）
   mr_trailing_ratio: 0.0            # MR移动止盈回撤比例（0=固定止盈，v19验证移动止盈在5min更差）
   mr_vol_ratio_max: 1.5             # 量比上限：量比>此值视为趋势加速（不触发）
+  mr_adx_max: 30.0                  # ADX上限：ADX>此值视为强趋势（不触发均值回归）
+  # 2026-07-30 ADX过滤验证（100股×1年×4组A/B）：
+  #   无过滤:  配对28084 净盈亏+380,191 成本/毛利36.0% 胜率21.9% 单笔13.5元
+  #   ADX25:  配对19438 净盈亏+320,527 成本/毛利30.6% 胜率23.3% 单笔16.5元
+  #   ADX30:  配对21036 净盈亏+368,956 成本/毛利29.4% 胜率23.0% 单笔17.5元 ← 最优
+  #   ADX35:  配对22696 净盈亏+343,909 成本/毛利32.9% 胜率22.6% 单笔15.2元
+  # 机制：ADX30-35区间为"强趋势持续区"（MR最易失败），ADX>35为"趋势 exhaustion区"（MR反而有效）
+  # ADX30在净盈亏（-3%）和成本效率（-6.6pp）间取得最佳平衡，单笔收益提升30%
   # ── 废弃字段（被 mr_target_return 替代，保留兼容但不再使用）──
   mr_take_profit_reversion_ratio: 0.3  # @deprecated 旧相对回归比例，VWAP漂移导致净亏
   mr_min_reversion: 0.001           # @deprecated 旧最小回归幅度，0.1%远小于0.27%成本
@@ -230,12 +305,25 @@ backtest:
   mr_max_t_size_ratio: 0.12        # 仓位12%（趋势跟随0.25更小）
   mr_cooldown_bars: 8              # 冷却8根（趋势跟随24更短）
 
-  # ── V3: Alpha 评分模式专属止损（2026-07-30）──
-  # alpha 评分模式下信号质量更高（胜率+2pp），但盈亏比下降（0.82 vs 1.43），
-  # 根因：固定 0.002 止损对 alpha 信号太紧，被噪音扫出。
-  # V3 模式给更宽的止损 0.004 让趋势发展，同时用更紧的 trailing 0.15 保护利润。
-  v3_alpha_stop_loss_ratio: 0.004   # V3 止损 0.4%（TF 的 2x，给 alpha 信号更多空间）
-  v3_alpha_trailing_ratio: 0.15     # V3 移动止盈回撤 15%（TF 的 0.2 更紧，保护利润）
+  # ── V3: Alpha 评分模式专属止损（2026-07-30 100股×1年验证最优）──
+  # 网格搜索结果（6组A/B）：
+  #   sl=0.002 tr=0.25 → 净+191K 胜率73.5% payoff1.42 盈利79/100 ← 最优
+  #   sl=0.003 tr=0.25 → 净+162K 胜率76.1% payoff0.90 盈利69/100
+  #   sl=0.004 tr=0.25 → 净+150K 胜率78.9% payoff0.68 盈利66/100
+  #   sl=0.004 tr=0.15 → 净+150K 胜率78.9% payoff0.68 盈利66/100（tr=0.15~0.25无差异）
+  #   sl=0.004 tr=0.30 → 净+127K 胜率78.9% payoff0.63 盈利58/100（tr=0.30回吐过多）
+  # 机制：sl越紧payoff越高（0.002→1.42, 0.003→0.90, 0.004→0.68）
+  #       sl=0.002与TF baseline相同，V3 Alpha的高质量信号使紧止损成为优势
+  v3_alpha_stop_loss_ratio: 0.002   # V3 止损 0.2%（与TF相同，验证最优）
+  v3_alpha_trailing_ratio: 0.25     # V3 移动止盈回撤 25%（tr=0.15~0.25无差异，0.30更差）
+  # V3 专属移动止盈激活门槛（2026-07-30 实验结论）
+  # 实验证明：trailing_activation_pct=0.0（立即激活）是V3 Alpha唯一能盈利的配置
+  # 放宽激活门槛（0.003/0.005）导致胜率从73.5%暴跌至53.6%，净盈亏从+191K→-9K
+  # 根因：V3 Alpha信号在5min级别以"高频小赚"模式盈利（avg_win=85, avg_loss=-60）
+  #       放宽激活→止损先于trailing触发→avg_loss膨胀(-60→-151)→净亏
+  # 结论：V3 Alpha的"买卖点过近"是其盈利模式的固有特征，非bug
+  #       要"捕捉完整上涨"需改用趋势跟随信号（TF baseline），非调整trailing参数
+  v3_alpha_trailing_activation_pct: 0.0   # 保持0.0（立即激活，实验验证唯一可盈利）
 
 # ── P1: 测量层配置（主计划 S2.6 / S3）──
 measurement:

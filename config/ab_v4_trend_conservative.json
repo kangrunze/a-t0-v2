@@ -1,0 +1,9 @@
+{
+  "sp": {
+    "expected_move_gate_enabled": true,
+    "atr_adaptive_trailing_enabled": true,
+    "atr_trailing_strong": 0.35,
+    "atr_trailing_medium": 0.25,
+    "atr_trailing_weak": 0.20
+  }
+}

@@ -22,6 +22,7 @@ from .expected_move_engine import ExpectedMoveEngine
 from .execution_engine import ExecutionEngine
 from .regime_engine import RegimeEngine
 from .risk_engine import RiskEngine
+from .hold_confidence_engine import HoldConfidenceEngine, check_trend_failure
 
 __all__ = [
     "BaseEngine",
@@ -32,4 +33,6 @@ __all__ = [
     "ExecutionEngine",
     "RegimeEngine",
     "RiskEngine",
+    "HoldConfidenceEngine",
+    "check_trend_failure",
 ]

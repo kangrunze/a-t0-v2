@@ -500,3 +500,23 @@ def compute_alpha_score_v3(
     alpha = max(0.0, min(100.0, alpha))
 
     return alpha, sub_scores
+
+
+def compute_expected_move_rr(
+    bars: list[dict],
+    snap: dict,
+    direction: str = "reduce",
+) -> Optional[float]:
+    """V4 L4 开仓闸门：计算 Expected Move 的 RR 值。
+
+    供 backtest.py 在 alpha_score >= alpha_threshold_open 后做开仓闸门检查：
+        RR = |预期收益|×price / ATR
+        RR < expected_move_rr_min 则拒绝开仓（防"买晚"）
+
+    :return: RR 值；None 表示数据不足（闸门应放行，避免误杀）
+    """
+    engines = _get_engines()
+    em = engines.get("expected_move")
+    if em is None:
+        return None
+    return em.compute_rr(bars, snap, direction)

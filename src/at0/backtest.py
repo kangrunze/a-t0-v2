@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from .features import compute_reference_snapshot
+from .features import compute_reference_snapshot, intraday_atr, dmi
 from .strategy import (
     SignalParams,
     evaluate_reduce_signal, evaluate_add_signal,
@@ -395,14 +395,18 @@ class BacktestParams:
     dynamic_stop_min_scale: float = 0.5
     dynamic_stop_max_scale: float = 2.0
 
-    # ── V3: Alpha 评分模式专属止损（2026-07-30）──
-    # alpha 评分模式下信号质量更高（胜率+2pp），但盈亏比下降（0.82 vs 1.43），
-    # 根因：固定 0.002 止损对 alpha 信号太紧，被噪音扫出。
-    # V3 模式给更宽的止损让趋势发展，同时提高阈值减少低质量信号。
+    # ── V3: Alpha 评分模式专属止损（2026-07-30 100股×1年验证最优）──
+    # sl=0.002 tr=0.25 为最优：净盈亏+191K, payoff1.42, 盈利79/100
+    # sl越紧payoff越高：0.002→1.42, 0.003→0.90, 0.004→0.68
     # v3_alpha_stop_loss_ratio: None=不覆盖（用 stop_loss_ratio），float=覆盖值
-    v3_alpha_stop_loss_ratio: Optional[float] = None
+    v3_alpha_stop_loss_ratio: Optional[float] = 0.002
     # V3 专属移动止盈回撤比例（None=不覆盖）
-    v3_alpha_trailing_ratio: Optional[float] = None
+    v3_alpha_trailing_ratio: Optional[float] = 0.25
+    # V3 专属移动止盈激活门槛（2026-07-30 实验结论）
+    # 实验证明：0.0（立即激活）是V3 Alpha唯一能盈利的配置
+    # 放宽激活门槛导致止损先于trailing触发，avg_loss膨胀，净亏
+    # None=不覆盖（用全局trailing_activation_pct），float=覆盖值
+    v3_alpha_trailing_activation_pct: Optional[float] = 0.0
 
     @property
     def is_mean_reversion(self) -> bool:
@@ -429,6 +433,13 @@ class BacktestParams:
         if self.is_v3_alpha and self.v3_alpha_trailing_ratio is not None:
             return self.v3_alpha_trailing_ratio
         return self.trailing_ratio
+
+    @property
+    def effective_trailing_activation_pct(self) -> float:
+        """移动止盈激活门槛：V3 模式有专属覆盖，否则用全局值。"""
+        if self.is_v3_alpha and self.v3_alpha_trailing_activation_pct is not None:
+            return self.v3_alpha_trailing_activation_pct
+        return self.trailing_activation_pct
 
     @property
     def effective_max_holding_bars(self) -> int:
@@ -739,8 +750,23 @@ def backtest_single_day(
         # MR 模式禁用移动止盈：trailing 会抢先平仓，导致 MR 信号平仓(绝对价格止盈)无法触发
         # MR 模式只用固定止损防大亏，让 MR 信号平仓接管止盈逻辑
         # V3 alpha 模式：使用 effective_trailing_ratio 支持专属覆盖
+        # V4 趋势自适应 Trailing：根据 ADX 调整 trailing_ratio（强趋势宽/弱趋势紧）
+        _atr_trailing_dist = None  # ATR 绝对距离模式（当前未用，保留接口）
         if params.is_mean_reversion:
             effective_trailing = 0.0
+        elif params.signal_params.atr_adaptive_trailing_enabled:
+            # V4 趋势自适应 Trailing Ratio：
+            # 强趋势(ADX≥35): trailing_ratio大（让趋势跑，不急着止盈）
+            # 弱趋势(ADX<25): trailing_ratio小（快锁利润，防反转）
+            # 保持比例模型：trailing_distance = max_favorable × ratio
+            _bars_up_to = bars[:i+1]
+            _, _, _adx = dmi(_bars_up_to)
+            if _adx is not None and _adx >= 35.0:
+                effective_trailing = params.signal_params.atr_trailing_strong
+            elif _adx is not None and _adx >= 25.0:
+                effective_trailing = params.signal_params.atr_trailing_medium
+            else:
+                effective_trailing = params.signal_params.atr_trailing_weak
         else:
             effective_trailing = params.effective_trailing_ratio
 
@@ -760,7 +786,8 @@ def backtest_single_day(
             i, bar,
             stop_loss_ratio=params.effective_stop_loss_ratio,
             trailing_ratio=effective_trailing,
-            trailing_activation_pct=params.trailing_activation_pct,
+            trailing_activation_pct=params.effective_trailing_activation_pct,
+            atr_trailing_distance=_atr_trailing_dist,
         )
 
         # MR模式：对延迟腿检查硬止损（2%兜底，防极端亏损）
@@ -965,14 +992,68 @@ def backtest_single_day(
         # P2: Alpha 连续评分分支（主计划 S2.3）
         # use_continuous_alpha=True 时用 alpha_score 替代布尔触发
         # use_continuous_alpha=False 时走原逻辑（flag=false 逐笔一致）
+        # 2026-07-30 修复"买卖点过近"：平仓用独立阈值（v3_alpha_close_threshold），
+        # 比开仓阈值更高，让趋势发展，避免开仓后1-2根K线就触发对向平仓
         if params.signal_params.use_continuous_alpha:
             _snap = reduce_sig.snapshot or add_sig.snapshot or {}
             _snap_r = dict(_snap, _direction="reduce")
             _snap_a = dict(_snap, _direction="add")
             _alpha_r, _ = compute_alpha_score(_snap_r, params.signal_params)
             _alpha_a, _ = compute_alpha_score(_snap_a, params.signal_params)
-            reduce_ok = _alpha_r >= params.signal_params.alpha_threshold_open and not is_limit_up_locked
-            add_ok = _alpha_a >= params.signal_params.alpha_threshold_open and not is_limit_down_locked
+            # 开仓用 alpha_threshold_open；平仓用 v3_alpha_close_threshold（默认85，更高）
+            _close_th = params.signal_params.v3_alpha_close_threshold
+            if _close_th is None:
+                _close_th = params.signal_params.alpha_threshold_open
+            _open_th = params.signal_params.alpha_threshold_open
+            # 有持仓时，对向信号是平仓 → 用 _close_th；无持仓时是开仓 → 用 _open_th
+            _reduce_th = _close_th if has_buy_open else _open_th
+            _add_th = _close_th if has_sell_open else _open_th
+            reduce_ok = _alpha_r >= _reduce_th and not is_limit_up_locked
+            add_ok = _alpha_a >= _add_th and not is_limit_down_locked
+
+            # V4: L4 Expected Move 开仓闸门（Decision Engine，2026-07-30）
+            # 用户方案：Alpha 够用，瓶颈在 Exit。L4 作为开仓闸门防"买晚"：
+            #   仅在开仓时检查（平仓不检查），RR < 阈值拒绝开仓
+            #   RR = |预期收益|×price / ATR，衡量剩余空间 vs 当前波动
+            #   机制：Alpha=95 但剩余空间不足时放弃，自然拉远买卖点距离
+            if params.signal_params.expected_move_gate_enabled:
+                from at0.score.alpha_score import compute_expected_move_rr as _em_rr
+                _rr_min = params.signal_params.expected_move_rr_min
+                # reduce 开仓（not has_buy_open = 新建 sell 仓）：检查 RR
+                if reduce_ok and not has_buy_open:
+                    _rr_r = _em_rr(bars_up_to_now, _snap, "reduce")
+                    if _rr_r is not None and _rr_r < _rr_min:
+                        reduce_ok = False
+                # add 开仓（not has_sell_open = 新建 buy 仓）：检查 RR
+                if add_ok and not has_sell_open:
+                    _rr_a = _em_rr(bars_up_to_now, _snap, "add")
+                    if _rr_a is not None and _rr_a < _rr_min:
+                        add_ok = False
+
+            # V4: L6 HoldConfidence + L7 TrendFailure 退出引擎（Decision Engine，2026-07-30）
+            # 用户方案：Trailing 切香肠（持15min vs 主趋势60min）。
+            # L6/L7 锚定趋势状态退出，NOT 盈亏回撤：
+            #   L6: 持仓信心 < 阈值 → 强制平仓（趋势衰减，不等 Trailing）
+            #   L7: 趋势硬失败（2+信号）→ 立即平仓（趋势已死，即使+0.3%也走）
+            # 仅在持仓时检查（平仓方向），不干预开仓
+            if params.signal_params.hold_confidence_exit_enabled:
+                from at0.engines.hold_confidence_engine import (
+                    HoldConfidenceEngine as _HCE, check_trend_failure as _CTF,
+                )
+                _hc_engine = _HCE()
+                _hc_th = params.signal_params.hold_confidence_exit_threshold
+                # buy 仓平仓（reduce 信号）：评估 buy 仓持有信心
+                if has_buy_open and not reduce_ok:
+                    _hc = _hc_engine.score(bars_up_to_now, _snap_r, "reduce")
+                    _tf, _tf_reason = _CTF(_snap_r, "reduce")
+                    if _tf or _hc < _hc_th:
+                        reduce_ok = True and not is_limit_up_locked
+                # sell 仓平仓（add 信号）：评估 sell 仓持有信心
+                if has_sell_open and not add_ok:
+                    _hc = _hc_engine.score(bars_up_to_now, _snap_a, "add")
+                    _tf, _tf_reason = _CTF(_snap_a, "add")
+                    if _tf or _hc < _hc_th:
+                        add_ok = True and not is_limit_down_locked
 
         # 约束: cooldown_bars
         if (params.effective_cooldown_bars > 0 and state.last_signal_bar >= 0

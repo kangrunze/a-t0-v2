@@ -1,0 +1,6 @@
+{
+  "sp": {
+    "expected_move_gate_enabled": true,
+    "expected_move_rr_min": 1.5
+  }
+}

@@ -113,9 +113,9 @@ class SignalParams:
     tf_vwap_cross_threshold: float = 0.002  # |VWAP偏离| < 此值视为VWAP穿越（平仓条件，0.2%）
     tf_kdj_reverse_bars: int = 2          # KDJ连续N根反向确认（平仓条件，防单根噪声）
 
-    # ── P2: Alpha 连续评分开关（主计划 §2.3，默认关闭）──
-    # flag=false 时行为与改造前逐笔一致（主计划 §5 验收1）
-    # flag=true 时启用连续 alpha_score（P2 阶段实现，当前为 stub）
+    # ── P2: Alpha 连续评分开关（主计划 §2.3）──
+    # 2026-07-30：V3 Alpha 设为默认策略模式，不再使用 TF/MR
+    # dataclass默认False（yaml缺失时安全兜底），thresholds.yaml已设为true
     use_continuous_alpha: bool = False
     # Alpha 评分权重（等权起步，写入 thresholds.yaml 做版本管理）
     alpha_weight_vwap: float = 0.5
@@ -125,6 +125,43 @@ class SignalParams:
     alpha_weight_volume: float = 0.0
     # Alpha 触发阈值（连续评分模式下的开仓门槛）
     alpha_threshold_open: float = 80.0
+    # V3 Alpha 平仓阈值：对向信号需达到此值才触发信号平仓
+    # 2026-07-30 修复"买卖点过近"问题：开仓后1-2根K线对向alpha易达72，导致过早平仓
+    # 分离开仓/平仓阈值：开仓72（高质量信号），平仓85（极强反转才平仓），让趋势发展
+    # None=平仓用开仓阈值（旧行为，买卖点过近）；float=独立平仓阈值
+    v3_alpha_close_threshold: Optional[float] = 85.0
+
+    # ── V4: L4 Expected Move 开仓闸门（Decision Engine，2026-07-30）──
+    # 用户方案：Alpha 够用，瓶颈在 Exit。L4 作为开仓闸门防"买晚"：
+    #   alpha_score >= alpha_threshold_open 后，额外检查 Expected Move RR
+    #   RR = |预期收益|×price / ATR，RR < expected_move_rr_min 拒绝开仓
+    #   机制：Alpha=95 但剩余空间不足时放弃，自然拉远买卖点距离
+    # dataclass默认False（安全兜底），thresholds.yaml设为true启用
+    expected_move_gate_enabled: bool = False
+    expected_move_rr_min: float = 2.5
+
+    # ── V4: L6 HoldConfidence + L7 TrendFailure 退出引擎（Decision Engine，2026-07-30）──
+    # 用户方案：瓶颈在 Exit。Trailing 切香肠（持15min vs 主趋势60min）。
+    # L6/L7 替代 Trailing：锚定趋势状态退出，NOT 盈亏回撤。
+    #   L6 HoldConfidence: 每根K线重打分（EMA斜率/ADX/MACD/量能），信心<阈值退出
+    #   L7 TrendFailure: 趋势硬失败（EMA20破位+ADX衰减+MACD反转+量能枯竭，2+信号退出）
+    # 启用时禁用 Trailing（effective_trailing=0），保留固定止损兜底。
+    # dataclass默认False（安全兜底），thresholds.yaml设为true启用
+    hold_confidence_exit_enabled: bool = False
+    hold_confidence_exit_threshold: float = 70.0   # 信心 < 70 退出
+
+    # ── V4: 趋势自适应 Trailing（Decision Engine，2026-07-30）──
+    # 用户方案：Trailing = ATR × TrendScore（强趋势50%，弱趋势20%）
+    # 实现：根据 ADX 调整 trailing_ratio（保持比例模型，不改成绝对距离）
+    #   强趋势(ADX≥35): trailing_ratio=0.50（宽，让趋势跑）
+    #   中趋势(25≤ADX<35): trailing_ratio=0.35
+    #   弱趋势(ADX<25): trailing_ratio=0.20（紧，锁利润）
+    # V3 Alpha baseline 固定 trailing_ratio=0.25，本方案让 strong 更宽/weak 更紧
+    # dataclass默认False（安全兜底），yaml设为true启用
+    atr_adaptive_trailing_enabled: bool = False
+    atr_trailing_strong: float = 0.50    # 强趋势 trailing_ratio（ADX≥35，让趋势跑）
+    atr_trailing_medium: float = 0.35    # 中趋势 trailing_ratio（25≤ADX<35）
+    atr_trailing_weak: float = 0.20      # 弱趋势 trailing_ratio（ADX<25，锁利润）
 
     # Layer P — 平仓层（is_for_pairing=True 时使用）
     # 趋势跟随平仓：趋势反转信号（ADX回落/VWAP穿越/KDJ反向）
@@ -167,6 +204,7 @@ class SignalParams:
     mr_z_threshold: float = 1.0              # z-score阈值（100只调参最优：1.5→1.0）
     mr_lookback_bars: int = 12               # 回看窗口（计算价格极值、衰竭确认）
     mr_vol_ratio_max: float = 1.5            # 量比上限：量比>此值视为趋势仍在加速（不触发均值回归）
+    mr_adx_max: Optional[float] = 30.0      # ADX上限：ADX>此值视为强趋势（不触发均值回归），100股×1年验证最优
     # 平仓：基于开仓价的绝对价格收益率止盈（2026-07-29 修复 VWAP 漂移导致买卖点接近问题）
     # 旧实现用 vwap_dev 相对回归，VWAP 漂移会让平仓条件很快满足但价格几乎没动 → 净亏
     # 新实现：价格相对开仓价涨/跌 ≥ mr_target_return 才平仓，真正实现低买高卖
@@ -743,6 +781,18 @@ def _evaluate_mean_reversion(
         score += 1
     else:
         fired.append(f"[MR量能] 量比{vol_str} > {params.mr_vol_ratio_max}（趋势加速中，不触发）")
+
+    # 条件4：ADX不能太高（强趋势中均值回归易失败，过滤假信号）
+    # 2026-07-30 验证（100股×1年×4组A/B）：ADX30为最优点
+    #   无过滤: 成本/毛利36.0% 净盈亏+380K；ADX30: 成本/毛利29.4% 净盈亏+369K（仅-3%）
+    #   机制：ADX30-35为"强趋势持续区"（MR最易失败），ADX>35为"exhaustion区"（MR反而有效）
+    #   ADX30过滤掉25%的交易但仅损失3%净盈亏，单笔收益提升30%，成本占比改善6.6pp
+    # 硬过滤：ADX超限直接返回None（与z-score一致），避免在趋势市开逆势仓
+    adx_val = snap.get("adx")
+    if params.mr_adx_max is not None and adx_val is not None:
+        if adx_val > params.mr_adx_max:
+            return None  # 强趋势中均值回归易失败，硬否决
+        fired.append(f"[MR趋势] ADX={adx_val:.1f} ≤ {params.mr_adx_max}（非强趋势，可回归）")
 
     # 环境层
     if filter_passed:

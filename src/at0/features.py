@@ -363,6 +363,40 @@ def ema(bars: list[dict], period: int = 20) -> Optional[float]:
     return ema_val
 
 
+def ema_series(bars: list[dict], period: int = 20) -> list[float]:
+    """返回完整 EMA 序列（供斜率/趋势判断用）。
+
+    与 ema() 同算法，但返回从第 period 根开始的完整 EMA 数组。
+    """
+    if len(bars) < period:
+        return []
+    closes = [b["close"] for b in bars]
+    out = []
+    e = sum(closes[:period]) / period
+    out.append(e)
+    alpha = 2 / (period + 1)
+    for c in closes[period:]:
+        e = alpha * c + (1 - alpha) * e
+        out.append(e)
+    return out
+
+
+def ema_slope(bars: list[dict], period: int = 20, lookback: int = 5) -> Optional[float]:
+    """EMA 斜率：(ema[-1] - ema[-lookback-1]) / ema[-lookback-1]。
+
+    正值=上升趋势，负值=下降趋势。lookback=5 表示取最近5根的斜率。
+    用于 V4 L6 HoldConfidenceEngine 和 L7 TrendFailure。
+    """
+    series = ema_series(bars, period)
+    if len(series) < lookback + 1:
+        return None
+    prev = series[-(lookback + 1)]
+    curr = series[-1]
+    if prev <= 0:
+        return None
+    return (curr - prev) / prev
+
+
 # ═══════════════════════════════════════════════════════════════
 # MA — 简单移动平均
 # ═══════════════════════════════════════════════════════════════
@@ -682,6 +716,8 @@ def compute_reference_snapshot(
     ema_val = ema(bars, period=ema_period)
     ma5_val = ma(bars, period=5)
     ma20_val = ma(bars, period=ema_period)
+    # V4: EMA 斜率（供 L6 HoldConfidence / L7 TrendFailure 使用）
+    ema_slope_val = ema_slope(bars, period=ema_period, lookback=5)
     # 动量超买超卖（与 RSI/KDJ 高度相关，决策层择一即可）
     cci_val = cci(bars, period=atr_period)
     bias_val = bias(bars, period=6)
@@ -714,6 +750,7 @@ def compute_reference_snapshot(
         "consecutive_shrink_no_new_low": consecutive_shrink_no_new_low,
         # ── 扩展指标 ──
         "ema": ema_val,
+        "ema_slope": ema_slope_val,
         "ma5": ma5_val,
         "ma20": ma20_val,
         "cci": cci_val,
