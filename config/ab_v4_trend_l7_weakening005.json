@@ -1,0 +1,10 @@
+{
+  "sp": {
+    "expected_move_gate_enabled": true,
+    "hold_confidence_exit_enabled": false,
+    "trend_adaptive_trailing_enabled": true,
+    "trend_trailing_healthy": 0.25,
+    "trend_trailing_weakening": 0.05,
+    "trend_trailing_failing": 0.03
+  }
+}

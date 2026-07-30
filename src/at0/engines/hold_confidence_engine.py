@@ -171,3 +171,53 @@ def check_trend_failure(
     if failure_count >= 2:
         return True, "+".join(reasons)
     return False, ""
+
+
+def count_trend_failure_signals(
+    snap: dict,
+    direction: str = "reduce",
+) -> int:
+    """V4 L7 辅助：计算趋势失败信号数（0~4），供 Trend-Adaptive Trailing 使用。
+
+    与 check_trend_failure 的区别：
+      - check_trend_failure 返回 (bool, reason)，2+ 信号即判定失败
+      - 本函数返回信号数，供调用方分级调整 trailing_ratio
+
+    信号定义（与 check_trend_failure 一致）：
+      1. EMA20 破位: 价格穿越 EMA20 到不利侧
+      2. ADX 衰减: ADX < 25
+      3. MACD 反转: MACD hist 与持仓方向相反
+      4. 量能枯竭: volume_ratio < 0.6
+    """
+    price = snap.get("current_price")
+    ema_val = snap.get("ema")
+    adx = snap.get("adx")
+    macd_hist = snap.get("macd_hist")
+    vol_ratio = snap.get("volume_ratio")
+
+    is_buy = direction == "reduce"  # buy 仓
+    failure_count = 0
+
+    # 1. EMA20 破位
+    if price is not None and ema_val is not None and ema_val > 0:
+        if is_buy and price < ema_val:
+            failure_count += 1
+        elif not is_buy and price > ema_val:
+            failure_count += 1
+
+    # 2. ADX 衰减
+    if adx is not None and adx < 25.0:
+        failure_count += 1
+
+    # 3. MACD 反转
+    if macd_hist is not None:
+        if is_buy and macd_hist < 0:
+            failure_count += 1
+        elif not is_buy and macd_hist > 0:
+            failure_count += 1
+
+    # 4. 量能枯竭
+    if vol_ratio is not None and vol_ratio < 0.6:
+        failure_count += 1
+
+    return failure_count

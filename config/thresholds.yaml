@@ -133,6 +133,36 @@ signal:
   atr_trailing_medium: 0.35              # 中趋势 trailing_ratio（25≤ADX<35）
   atr_trailing_weak: 0.20               # 弱趋势 trailing_ratio（ADX<25，锁利润）
 
+  # ── V4: L7 信号调整 Trailing（Trend-Adaptive Trailing via L7 Signals）──
+  # 与 ATR 自适应的区别：用多因子 L7 信号（EMA20+ADX+MACD+量能）分级调整 trailing_ratio
+  # 机制：趋势健康时宽 trailing 让趋势跑，趋势减弱/失败时紧 trailing 快速锁利润
+  # 与 L6/L7 直接退出的区别：不直接退出（避免 avg_loss 增大），只调整 trailing 回撤幅度
+  # 信号定义（0~4）：
+  #   1. EMA20 破位: 价格穿越 EMA20 到不利侧
+  #   2. ADX 衰减: ADX < 25
+  #   3. MACD 反转: MACD hist 与持仓方向相反
+  #   4. 量能枯竭: volume_ratio < 0.6
+  # 分级：L7=0(健康)→宽 trailing / L7=1(减弱)→紧 / L7≥2(失败)→更紧
+  #
+  # 100股×1年 A/B 验证结论（2026-07-30，11组参数扫描）：
+  #   L4 only baseline (fixed 0.25):   净+186,925  Payoff1.52  avg_win+93.39
+  #   conservative (0.30/0.25/0.15):   净+205,171  Payoff1.60  avg_win+98.75  (+9.8%)
+  #   aggressive  (0.40/0.25/0.10):    净+214,161  Payoff1.65  avg_win+101.39 (+14.6%)
+  #   tight-all   (0.25/0.15/0.03):    净+251,097  Payoff1.82  avg_win+112.26 (+34.3%)
+  #   w005f003    (0.25/0.05/0.03):    净+274,932  Payoff1.94  avg_win+119.26 (+47.1%) ← 最优
+  #   unified     (0.25/0.03/0.03):    净+279,698  Payoff1.96  avg_win+120.67 (+49.6%)
+  #
+  # 关键发现（分解实验）：
+  #   1. 收紧 failing(0.25→0.05) 是主要驱动（+19.6%），放宽 healthy(0.25→0.50) 单独无效(-0.2%)
+  #   2. 收紧 weakening(0.25→0.05) 贡献最大（+12.8pp），failing(0.05→0.03) 边际递减(+2.0pp)
+  #   3. 胜率/交易笔数/avg_loss 完全不变 → 纯退出改进，不干预开仓
+  #   4. 机制：L7 信号是趋势减弱的可靠早期预警，一旦出现即紧 trailing 锁利润
+  # 决定：启用 0.25/0.05/0.03（w=0.05 为边际递减拐点，3级结构更有原则性）
+  trend_adaptive_trailing_enabled: true   # L7 信号调整 Trailing 开关（验证通过，启用）
+  trend_trailing_healthy: 0.25          # L7=0 信号（趋势健康）：基线 trailing（放宽healthy单独无效，保持0.25）
+  trend_trailing_weakening: 0.05        # L7=1 信号（趋势减弱）：紧 trailing，快速锁利润
+  trend_trailing_failing: 0.03          # L7≥2 信号（趋势失败）：更紧 trailing，几乎立即锁利润
+
   # ── Stage K: 均值回归模式（与趋势跟随互斥，手动选择）──
   # K0闸门：振幅筛选36只×3年，|vwap_dev|≥3%时回归概率55-64%且期望值为正
   # 触发：z-score标准化 + 衰竭确认 + 量能约束

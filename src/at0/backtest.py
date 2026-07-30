@@ -754,6 +754,27 @@ def backtest_single_day(
         _atr_trailing_dist = None  # ATR 绝对距离模式（当前未用，保留接口）
         if params.is_mean_reversion:
             effective_trailing = 0.0
+        elif params.signal_params.trend_adaptive_trailing_enabled:
+            # V4 Trend-Adaptive Trailing via L7 Signals：
+            # 用多因子 L7 信号（EMA20+ADX+MACD+量能）分级调整 trailing_ratio
+            # L7=0(健康)→宽 trailing / L7=1(减弱)→标准 / L7≥2(失败)→紧 trailing
+            # 与 ATR 自适应的区别：多因子信号 vs 单 ADX；与 L6/L7 直接退出的区别：只调 trailing 不直接退出
+            from at0.engines.hold_confidence_engine import count_trend_failure_signals as _ctfs
+            _bars_up_to = bars[:i+1]
+            _snap_tr = compute_reference_snapshot(_bars_up_to, current_price=price, prev_close=prev_close)
+            # 取首个 open leg 方向（FIFO），无持仓时用中性 0 信号
+            _open_legs_tr = state.lifecycle.open_legs
+            if _open_legs_tr:
+                _dir_tr = "reduce" if _open_legs_tr[0].direction == "buy" else "add"
+                _sig_cnt = _ctfs(_snap_tr, _dir_tr)
+            else:
+                _sig_cnt = 0
+            if _sig_cnt == 0:
+                effective_trailing = params.signal_params.trend_trailing_healthy
+            elif _sig_cnt == 1:
+                effective_trailing = params.signal_params.trend_trailing_weakening
+            else:
+                effective_trailing = params.signal_params.trend_trailing_failing
         elif params.signal_params.atr_adaptive_trailing_enabled:
             # V4 趋势自适应 Trailing Ratio：
             # 强趋势(ADX≥35): trailing_ratio大（让趋势跑，不急着止盈）

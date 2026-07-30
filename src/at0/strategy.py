@@ -163,6 +163,15 @@ class SignalParams:
     atr_trailing_medium: float = 0.35    # 中趋势 trailing_ratio（25≤ADX<35）
     atr_trailing_weak: float = 0.20      # 弱趋势 trailing_ratio（ADX<25，锁利润）
 
+    # V4: L7 信号调整 Trailing（Trend-Adaptive Trailing via L7 Signals）
+    # 与 ATR 自适应的区别：用多因子 L7 信号（EMA20+ADX+MACD+量能）分级调整 trailing_ratio
+    # 机制：趋势健康时宽 trailing 让趋势跑，趋势失败时紧 trailing 快速锁利润
+    # 与 L6/L7 直接退出的区别：不直接退出（避免 avg_loss 增大），只调整 trailing 回撤幅度
+    trend_adaptive_trailing_enabled: bool = False
+    trend_trailing_healthy: float = 0.30     # L7=0 信号（趋势健康）：宽 trailing，让趋势跑
+    trend_trailing_weakening: float = 0.25   # L7=1 信号（趋势减弱）：标准 trailing
+    trend_trailing_failing: float = 0.15     # L7≥2 信号（趋势失败）：紧 trailing，快速锁利润
+
     # Layer P — 平仓层（is_for_pairing=True 时使用）
     # 趋势跟随平仓：趋势反转信号（ADX回落/VWAP穿越/KDJ反向）
     pairing_vwap_dev_threshold: float = 0.008  # 平仓阈值下限（0.8%），open_vwap_dev 缺失时退化为此值
