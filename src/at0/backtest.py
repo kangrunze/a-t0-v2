@@ -759,17 +759,32 @@ def backtest_single_day(
             # 用多因子 L7 信号（EMA20+ADX+MACD+量能）分级调整 trailing_ratio
             # L7=0(健康)→宽 trailing / L7=1(减弱)→标准 / L7≥2(失败)→紧 trailing
             # 与 ATR 自适应的区别：多因子信号 vs 单 ADX；与 L6/L7 直接退出的区别：只调 trailing 不直接退出
+            #
+            # P3 优化（2026-07-31）：ADX 衰减阈值参数化（l7_adx_weak_threshold，默认20，原25）
+            # 优化3 强趋势保护（2026-07-31）：ADX≥l7_strong_trend_protection_adx(默认35)时
+            #   强制用 healthy trailing，不收紧——强趋势中 L7 信号多为噪声，收紧会切断趋势利润
             from at0.engines.hold_confidence_engine import count_trend_failure_signals as _ctfs
             _bars_up_to = bars[:i+1]
             _snap_tr = compute_reference_snapshot(_bars_up_to, current_price=price, prev_close=prev_close)
+            _adx_tr = _snap_tr.get("adx")
             # 取首个 open leg 方向（FIFO），无持仓时用中性 0 信号
             _open_legs_tr = state.lifecycle.open_legs
             if _open_legs_tr:
                 _dir_tr = "reduce" if _open_legs_tr[0].direction == "buy" else "add"
-                _sig_cnt = _ctfs(_snap_tr, _dir_tr)
+                _sig_cnt = _ctfs(
+                    _snap_tr, _dir_tr,
+                    adx_weak_threshold=params.signal_params.l7_adx_weak_threshold,
+                )
             else:
                 _sig_cnt = 0
-            if _sig_cnt == 0:
+            # 优化3：强趋势保护——ADX≥保护门槛时强制 healthy，不让 L7 信号收紧 trailing
+            _strong_adx = (
+                _adx_tr is not None
+                and _adx_tr >= params.signal_params.l7_strong_trend_protection_adx
+            )
+            if _strong_adx:
+                effective_trailing = params.signal_params.trend_trailing_healthy
+            elif _sig_cnt == 0:
                 effective_trailing = params.signal_params.trend_trailing_healthy
             elif _sig_cnt == 1:
                 effective_trailing = params.signal_params.trend_trailing_weakening

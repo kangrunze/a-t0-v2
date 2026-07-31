@@ -103,7 +103,7 @@ class TradeLeg:
         """从字典创建（兼容旧 open_legs 格式）。
 
         P0-2 整改（2026-07-24）：读回 open_vwap_dev，保持跨日腿动态平仓阈值连续。
-        旧格式无此字段时退化为 None（_compute_pairing_threshold 会退化为固定 floor）。
+        旧格式无此字段时退化为 None（旧动态阈值函数已删除，此字段保留兼容）。
         """
         return cls(
             direction=d["direction"],

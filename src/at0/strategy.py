@@ -171,6 +171,13 @@ class SignalParams:
     trend_trailing_healthy: float = 0.30     # L7=0 信号（趋势健康）：宽 trailing，让趋势跑
     trend_trailing_weakening: float = 0.25   # L7=1 信号（趋势减弱）：标准 trailing
     trend_trailing_failing: float = 0.15     # L7≥2 信号（趋势失败）：紧 trailing，快速锁利润
+    # P3 优化（2026-07-31）：L7 ADX 衰减阈值参数化，从硬编码 25 降至 20
+    # 原因：ADX<25 在趋势盘中频繁触发（5min ADX 波动大），导致 L7 信号过敏感、
+    # trailing 过早收紧、买卖点过近。降至 20 减少误杀，让中等趋势(20-25)不被判为衰减。
+    l7_adx_weak_threshold: float = 20.0      # L7 信号中 ADX 衰减判定阈值（<此值视为趋势衰减）
+    # 优化3 强趋势保护（2026-07-31）：ADX≥此值时强制用 healthy trailing，不收紧
+    # 原因：强趋势中 L7 信号（EMA20破位/MACD反转）多为噪声，收紧 trailing 会切断趋势利润
+    l7_strong_trend_protection_adx: float = 35.0  # 强趋势保护 ADX 门槛（≥此值不收紧 trailing）
 
     # Layer P — 平仓层（is_for_pairing=True 时使用）
     # 趋势跟随平仓：趋势反转信号（ADX回落/VWAP穿越/KDJ反向）
@@ -335,58 +342,6 @@ def _price_trend_confirmed(bars: list[dict], direction: str, lookback: int) -> b
 
 
 # ═══════════════════════════════════════════════════════════════
-# 平仓动态阈值计算（方案C1修正版）
-# ═══════════════════════════════════════════════════════════════
-# @deprecated 此函数为均值回归时代的平仓阈值计算，趋势跟随转向后全项目无调用。
-# 保留以备未来回归策略复用，新增代码不应依赖此函数。
-def _compute_pairing_threshold(
-    open_vwap_dev: Optional[float],
-    params: SignalParams,
-    holding_ratio: float = 0.0,
-) -> float:
-    """
-    计算平仓动态阈值（方案C1修正版 + 方案B时间衰减）。
-
-    基础阈值 = max(floor, min(|open_dev| - cost, |open_dev| × max_regression_ratio))
-
-    - floor (pairing_vwap_dev_threshold, 0.8%): 下限保护，避免阈值过小
-    - |open_dev| - cost: 距离锚定成本，价格回归到"仍能覆盖成本"的位置即平仓
-    - |open_dev| × max_regression_ratio (0.7): 上限保护，防止 open_dev 过大时
-      阈值过松导致过早平仓（修正 C1 原始公式在 open_dev>4% 时的缺陷）
-
-    方案B 时间衰减（holding_ratio > 0 时生效）：
-      holding_ratio = holding_bars / max_holding_bars（0.0~1.0）
-      - >0.8（接近超时）：阈值 ×0.5，让腿更容易平仓，避免被动 expired
-      - >0.5（过半未平）：阈值 ×0.7，适度降低门槛促成平仓
-      - ≤0.5：不衰减
-    目的：把"被动 expired 大亏"转化为"主动平仓 小亏/小赚"。
-
-    open_vwap_dev 为 None 时（未传入开仓信息，向后兼容），退化为固定 floor（仍受衰减影响）。
-
-    回放验证依据: outputs/backtest/diagnose_formula_replay.json
-      - C1 触发 34 条 / +10,838 元（vs C2 触发 10 条 / +11,011 元）
-      - C1 触发数是 C2 的 3.4 倍，统计更稳；C2 盈亏集中度高不可信
-      - C1 原始公式在 open_dev=5.17% 时阈值 4.57% 过松，单条亏损 -3818
-        加 70% 上限后阈值降至 3.62%，可避免此类过早平仓
-    """
-    floor = params.pairing_vwap_dev_threshold
-    if open_vwap_dev is None:
-        base = floor
-    else:
-        open_dev_abs = abs(open_vwap_dev)
-        cost_anchored = open_dev_abs - params.min_capture_spread_for_pairing
-        max_allowed = open_dev_abs * params.pairing_max_regression_ratio
-        base = max(floor, min(cost_anchored, max_allowed))
-
-    # 方案B：时间衰减（接近超时时降低平仓门槛）
-    if holding_ratio > 0.8:
-        return base * 0.5
-    elif holding_ratio > 0.5:
-        return base * 0.7
-    return base
-
-
-# ═══════════════════════════════════════════════════════════════
 # 趋势过滤判定（P0-6: 委托给 features 层的 detect_market_regime）
 # ═══════════════════════════════════════════════════════════════
 def _judge_trend_context(snap: dict, params: SignalParams, frequency: str = "1min") -> str:
@@ -465,7 +420,7 @@ def evaluate_reduce_signal(
     （趋势跟随本身即顺趋势，无需对逆势开仓加严）。
 
     open_vwap_dev: @deprecated 开仓时刻的 vwap_dev（由调用方从 TradeLeg 传入）。
-                  趋势跟随不再使用动态平仓阈值（_compute_pairing_threshold），
+                  趋势跟随不再使用动态平仓阈值（已删除），
                   保留参数以兼容函数签名，函数体内不读取此值。
                   新增代码不应依赖此参数。
     """
@@ -867,7 +822,7 @@ def evaluate_add_signal(
     趋势过滤（_judge_trend_context）保留但仅作信息记录，不再用于逆势加严。
 
     open_vwap_dev: @deprecated 开仓时刻的 vwap_dev（由调用方从 TradeLeg 传入）。
-                  趋势跟随不再使用动态平仓阈值（_compute_pairing_threshold），
+                  趋势跟随不再使用动态平仓阈值（已删除），
                   保留参数以兼容函数签名，函数体内不读取此值。
                   新增代码不应依赖此参数。
     """

@@ -118,14 +118,18 @@ class HoldConfidenceEngine(BaseEngine):
 def check_trend_failure(
     snap: dict,
     direction: str = "reduce",
+    adx_weak_threshold: float = 20.0,
 ) -> tuple[bool, str]:
     """V4 L7: 趋势硬失败检查。
 
     四项信号中 2+ 项触发即判定趋势失败（避免单信号误杀）：
       1. EMA20 破位: 价格穿越 EMA20 到不利侧
-      2. ADX 衰减: ADX < 25（趋势消失）
+      2. ADX 衰减: ADX < adx_weak_threshold（趋势消失）
       3. MACD 反转: MACD hist 与持仓方向相反
       4. 量能枯竭: volume_ratio < 0.6
+
+    P3 优化（2026-07-31）：adx_weak_threshold 参数化，从硬编码 25 降至默认 20，
+    减少 5min ADX 波动导致的误杀。
 
     :return: (是否失败, 原因字符串)
     """
@@ -149,7 +153,7 @@ def check_trend_failure(
             reasons.append("ema20_break")
 
     # 2. ADX 衰减
-    if adx is not None and adx < 25.0:
+    if adx is not None and adx < adx_weak_threshold:
         failure_count += 1
         reasons.append("adx_weak")
 
@@ -176,6 +180,7 @@ def check_trend_failure(
 def count_trend_failure_signals(
     snap: dict,
     direction: str = "reduce",
+    adx_weak_threshold: float = 20.0,
 ) -> int:
     """V4 L7 辅助：计算趋势失败信号数（0~4），供 Trend-Adaptive Trailing 使用。
 
@@ -185,9 +190,11 @@ def count_trend_failure_signals(
 
     信号定义（与 check_trend_failure 一致）：
       1. EMA20 破位: 价格穿越 EMA20 到不利侧
-      2. ADX 衰减: ADX < 25
+      2. ADX 衰减: ADX < adx_weak_threshold
       3. MACD 反转: MACD hist 与持仓方向相反
       4. 量能枯竭: volume_ratio < 0.6
+
+    P3 优化（2026-07-31）：adx_weak_threshold 参数化，默认 20（原硬编码 25）。
     """
     price = snap.get("current_price")
     ema_val = snap.get("ema")
@@ -206,7 +213,7 @@ def count_trend_failure_signals(
             failure_count += 1
 
     # 2. ADX 衰减
-    if adx is not None and adx < 25.0:
+    if adx is not None and adx < adx_weak_threshold:
         failure_count += 1
 
     # 3. MACD 反转

@@ -1,0 +1,16 @@
+{
+  "sp": {
+    "use_continuous_alpha": true,
+    "strategy_mode": "trend_following",
+    "alpha_threshold_open": 72.0,
+    "trend_adaptive_trailing_enabled": true,
+    "trend_trailing_healthy": 0.25,
+    "trend_trailing_weakening": 0.15,
+    "trend_trailing_failing": 0.08
+  },
+  "bp": {
+    "v3_alpha_stop_loss_ratio": 0.004,
+    "v3_alpha_trailing_ratio": 0.35,
+    "v3_alpha_trailing_activation_pct": 0.005
+  }
+}

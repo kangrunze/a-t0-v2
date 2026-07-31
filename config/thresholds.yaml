@@ -162,6 +162,12 @@ signal:
   trend_trailing_healthy: 0.25          # L7=0 信号（趋势健康）：基线 trailing（放宽healthy单独无效，保持0.25）
   trend_trailing_weakening: 0.05        # L7=1 信号（趋势减弱）：紧 trailing，快速锁利润
   trend_trailing_failing: 0.03          # L7≥2 信号（趋势失败）：更紧 trailing，几乎立即锁利润
+  # P3 优化（2026-07-31）：L7 ADX 衰减阈值 25→20，减少 5min ADX 波动导致的误杀
+  # B4 测试根因：ADX<25 在趋势盘中频繁触发，L7 信号过敏感→trailing 过早收紧→买卖点过近
+  l7_adx_weak_threshold: 20.0           # L7 信号中 ADX 衰减判定阈值（<此值视为趋势衰减，原硬编码25）
+  # 优化3 强趋势保护（2026-07-31）：ADX≥此值时强制用 healthy trailing，不收紧
+  # 强趋势中 L7 信号（EMA20破位/MACD反转）多为噪声，收紧会切断趋势利润
+  l7_strong_trend_protection_adx: 35.0  # 强趋势保护 ADX 门槛（≥此值不收紧 trailing）
 
   # ── Stage K: 均值回归模式（与趋势跟随互斥，手动选择）──
   # K0闸门：振幅筛选36只×3年，|vwap_dev|≥3%时回归概率55-64%且期望值为正
