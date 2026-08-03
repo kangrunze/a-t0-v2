@@ -502,6 +502,9 @@ class BacktestState:
     lifecycle: Optional[TradeLifecycle] = None
     # P0-3: 尾盘风险事件
     risk_events: list[dict] = field(default_factory=list)
+    # Stage M0: 当根K线的引擎上下文（alpha/sub_scores/RR），
+    # 由主循环每根K线刷新，_execute_trade 时快照进 trade_record.engine_ctx
+    alpha_ctx: dict = field(default_factory=dict)
 
     @property
     def open_legs(self) -> list[dict]:
@@ -1032,10 +1035,33 @@ def backtest_single_day(
         # 比开仓阈值更高，让趋势发展，避免开仓后1-2根K线就触发对向平仓
         if params.signal_params.use_continuous_alpha:
             _snap = reduce_sig.snapshot or add_sig.snapshot or {}
-            _snap_r = dict(_snap, _direction="reduce")
-            _snap_a = dict(_snap, _direction="add")
-            _alpha_r, _ = compute_alpha_score(_snap_r, params.signal_params)
-            _alpha_a, _ = compute_alpha_score(_snap_a, params.signal_params)
+            # ── Stage M0.5 修复（2026-07-31）──
+            # 旧代码只注入 _direction，未注入 _bars，导致
+            # compute_alpha_score_v3 内 `engines = _get_engines() if bars else {}`
+            # 恒取空字典 → Wave/Support/ExpectedMove/Regime/Risk 五个 Engine
+            # 在回测中从未执行（实盘 strategy.evaluate_all_signals 却是执行的）。
+            # 这里对齐实盘口径；置 v3_engines_in_backtest=False 可复现旧基线。
+            if params.signal_params.v3_engines_in_backtest:
+                _snap_r = dict(_snap, _direction="reduce", _bars=bars_up_to_now)
+                _snap_a = dict(_snap, _direction="add", _bars=bars_up_to_now)
+            else:
+                _snap_r = dict(_snap, _direction="reduce")
+                _snap_a = dict(_snap, _direction="add")
+            _alpha_r, _sub_r = compute_alpha_score(_snap_r, params.signal_params)
+            _alpha_a, _sub_a = compute_alpha_score(_snap_a, params.signal_params)
+            # ── Stage M0 Trade Event Logger ──
+            # 记录当根K线的引擎上下文，_execute_trade 会把它写进 trade_record，
+            # 供 Measurement V2 做引擎归因（Support/Confidence/Expected Accuracy）。
+            state.alpha_ctx = {
+                "bar_idx": i,
+                "alpha_reduce": round(_alpha_r, 2),
+                "alpha_add": round(_alpha_a, 2),
+                "sub_reduce": {k: round(float(v), 2) for k, v in (_sub_r or {}).items()
+                               if isinstance(v, (int, float))},
+                "sub_add": {k: round(float(v), 2) for k, v in (_sub_a or {}).items()
+                            if isinstance(v, (int, float))},
+                "engines_active": bool(params.signal_params.v3_engines_in_backtest),
+            }
             # 开仓用 alpha_threshold_open；平仓用 v3_alpha_close_threshold（默认85，更高）
             _close_th = params.signal_params.v3_alpha_close_threshold
             if _close_th is None:
@@ -1058,11 +1084,13 @@ def backtest_single_day(
                 # reduce 开仓（not has_buy_open = 新建 sell 仓）：检查 RR
                 if reduce_ok and not has_buy_open:
                     _rr_r = _em_rr(bars_up_to_now, _snap, "reduce")
+                    state.alpha_ctx["expected_rr_reduce"] = _rr_r
                     if _rr_r is not None and _rr_r < _rr_min:
                         reduce_ok = False
                 # add 开仓（not has_sell_open = 新建 buy 仓）：检查 RR
                 if add_ok and not has_sell_open:
                     _rr_a = _em_rr(bars_up_to_now, _snap, "add")
+                    state.alpha_ctx["expected_rr_add"] = _rr_a
                     if _rr_a is not None and _rr_a < _rr_min:
                         add_ok = False
 
@@ -1237,6 +1265,18 @@ def _execute_trade(
     trade_record["rules_fired"] = signal.rules_fired
     trade_record["vwap"] = ref_price
     trade_record["expected_spread"] = expected_spread if ref_price > 0 else 0
+
+    # ── Stage M0 Trade Event Logger ──
+    # 把当根K线的引擎上下文快照进成交记录。只取与本次成交方向对应的一侧，
+    # 让 Measurement V2 可以做「引擎打了多少分 → 这笔交易实际赚了多少」的归因。
+    if state.alpha_ctx:
+        _side = "add" if direction == "buy" else "reduce"
+        trade_record["engine_ctx"] = {
+            "alpha": state.alpha_ctx.get(f"alpha_{_side}"),
+            "sub_scores": state.alpha_ctx.get(f"sub_{_side}", {}),
+            "expected_rr": state.alpha_ctx.get(f"expected_rr_{_side}"),
+            "engines_active": state.alpha_ctx.get("engines_active", False),
+        }
 
     # 累计配对盈亏
     state.cost_reduction += trade_record["pnl"]

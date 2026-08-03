@@ -1,0 +1,6 @@
+{
+  "_comment": "Stage M0.5 候选组：回测注入 _bars，与实盘 strategy.evaluate_all_signals 同口径，Wave/Support/ExpectedMove/Regime/Risk 真实参与打分。",
+  "sp": {
+    "v3_engines_in_backtest": true
+  }
+}

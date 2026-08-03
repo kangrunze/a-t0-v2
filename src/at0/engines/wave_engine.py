@@ -1,28 +1,28 @@
 """
-G4: Wave Engine — 波浪位置评分
-================================
+G4: Wave Engine — 当日波浪位置评分
+==================================
+Stage W 重构（2026-07-31）：
 
-职责：
-  评估当前价格处于波浪的哪个位置，避免在波浪末期追高/追低。
+核心职责：回答"当前价格处于当日第几波"，而非趋势老化度。
+  - 第1波：95分（趋势刚开始，最优买点）
+  - 第2波：72分（趋势确认，仍可买）
+  - 第3波：38分（趋势成熟，谨慎）
+  - 第4+波：0分（趋势末期/追高，不买）
 
-用户方案 §六：
-  WaveScore 基于：
-    - Trend Age（趋势持续时间）：越长扣分越多（趋势可能衰竭）
-    - HH Count（连续创新高次数）：越多扣分越多（可能见顶）
-    - HL Count（Higher Low 次数）：趋势健康度
-    - ATR Expansion（波动率扩张/收缩）：扩张=趋势加速，收缩=趋势衰竭
-    - Momentum Decay（动量衰减）：最近动量 vs 之前动量
-    - Volume Decay（成交量衰减）：缩量=趋势衰竭
+波浪识别算法（基于 swing high/low）：
+  1. 提取当日 K线序列
+  2. 用 window 窗口找 swing high（局部高点）
+  3. 相邻 swing high 之间算一波
+  4. 判断当前 bar 落在第几波
 
-评分逻辑：
-  100: 波浪起点（趋势刚开始，Trend Age 短，HH 少，量能放大）
-  50: 波浪中段
-  0: 波浪末期（Trend Age 长，HH 过多，量能衰减，动量衰减）
+趋势老化微调（±10分）：
+  保留原 WaveEngine 的 Trend Age / Volume Decay 因子，
+  作为波数基础分上的微调，不改变核心波数判定。
 
-趋势跟随适配：
-  - direction="reduce"：价格在波浪高位（HH 多），适合卖出
-  - direction="add"：价格在波浪低位（HL 少），适合买入
-  但 Wave Score 本身是位置评分，不区分方向。方向由 alpha 聚合层处理。
+用户方案 §六 WaveScore 因子（作为微调项保留）：
+  - Trend Age（趋势持续时间）：越长扣分越多
+  - ATR Expansion：扩张=趋势加速，收缩=衰竭
+  - Volume Decay：缩量=趋势衰竭
 """
 from __future__ import annotations
 
@@ -33,7 +33,18 @@ from .base import BaseEngine
 
 
 class WaveEngine(BaseEngine):
-    """G4: 波浪位置评分。"""
+    """G4: 当日波浪位置评分。
+
+    核心：波数识别 → 波数→评分映射 → 趋势老化微调。
+    """
+
+    # 波数→基础评分映射（用户方案：第1波95/第2波72/第3波38/第4+波0）
+    WAVE_SCORE_MAP = {1: 95.0, 2: 72.0, 3: 38.0}
+    WAVE_SCORE_BEYOND = 0.0  # 第4波及以上：0分（不买）
+
+    # 波浪识别参数
+    SWING_WINDOW = 3  # swing high/low 识别窗口（前后各3根K线）
+    MIN_BARS_FOR_WAVE = 10  # 识别波浪的最小K线数
 
     @property
     def name(self) -> str:
@@ -45,154 +56,179 @@ class WaveEngine(BaseEngine):
         snap: dict,
         direction: str = "reduce",
     ) -> float:
-        """计算波浪位置评分 (0~100)。"""
-        if len(bars) < 10:
-            return 50.0
+        """计算波浪位置评分 (0~100)。
 
-        # 1. Trend Age：当前趋势持续了多少根 K 线
+        :param bars: 完整 K 线序列（含历史，跨日），按时间升序
+        :param snap: 当前 bar 的特征快照
+        :param direction: "reduce"（卖出腿）或 "add"（买入腿）
+        :return: 0~100 的子评分
+        """
+        if len(bars) < self.MIN_BARS_FOR_WAVE:
+            return 50.0  # 数据不足，中性
+
+        # 1. 提取当日 K线
+        today_bars = self._extract_today_bars(bars)
+        if len(today_bars) < self.MIN_BARS_FOR_WAVE:
+            return 50.0  # 当日数据不足，中性
+
+        # 2. 识别当日波浪（swing high 序列）
+        waves = self._identify_waves(today_bars)
+
+        # 3. 判断当前 bar 落在第几波
+        if not waves:
+            # 当日无明确波浪（震荡市），给中性偏高分（鼓励首波尝试）
+            return 60.0
+
+        current_idx = len(today_bars) - 1  # 当日最后一根 = 当前 bar
+        wave_number = self._locate_wave(current_idx, waves)
+
+        # 4. 波数 → 基础评分
+        base_score = self.WAVE_SCORE_MAP.get(
+            wave_number, self.WAVE_SCORE_BEYOND)
+
+        # 5. 趋势老化微调（±10分，不改变核心波数判定）
+        age_adj = self._compute_age_adjustment(bars, direction)
+        vol_adj = self._compute_volume_adjustment(bars)
+
+        final = base_score + age_adj + vol_adj
+        return max(0.0, min(100.0, final))
+
+    # ═══════════════════════════════════════════════════════════════
+    # 当日 K线提取
+    # ═══════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _extract_today_bars(bars: list[dict]) -> list[dict]:
+        """从完整 bars 中提取当日 K线。
+
+        bars 的 time 格式: 'YYYY-MM-DD HH:MM:SS'。
+        取最后一根 bar 的日期，筛选当日所有 bar。
+        """
+        if not bars:
+            return []
+        last_time = bars[-1].get("time", "")
+        if len(last_time) < 10:
+            return bars[-48:] if len(bars) >= 48 else bars  # 退化为最近48根
+
+        today_str = last_time[:10]  # 'YYYY-MM-DD'
+        today_bars = [b for b in bars if b.get("time", "")[:10] == today_str]
+        return today_bars if today_bars else [bars[-1]]
+
+    # ═══════════════════════════════════════════════════════════════
+    # 波浪识别（swing high 序列）
+    # ═══════════════════════════════════════════════════════════════
+
+    def _identify_waves(self, day_bars: list[dict]) -> list[dict]:
+        """识别当日波浪（基于 swing high）。
+
+        算法：用 SWING_WINDOW 窗口找局部高点（swing high），
+        每个 swing high 标记一波的结束。
+
+        :return: [{"wave_idx": 1, "end_bar": i, "high": price}, ...]
+        """
+        w = self.SWING_WINDOW
+        if len(day_bars) < w * 2 + 1:
+            return []
+
+        swing_highs: list[tuple[int, float]] = []
+        for i in range(w, len(day_bars) - w):
+            is_swing = True
+            center_high = day_bars[i].get("high", 0.0)
+            if center_high <= 0:
+                continue
+            for j in range(i - w, i + w + 1):
+                if j == i:
+                    continue
+                if day_bars[j].get("high", 0.0) > center_high:
+                    is_swing = False
+                    break
+            if is_swing:
+                swing_highs.append((i, center_high))
+
+        if not swing_highs:
+            return []
+
+        # 构建波浪列表
+        waves = []
+        for k, (idx, high) in enumerate(swing_highs):
+            waves.append({
+                "wave_idx": k + 1,
+                "end_bar": idx,
+                "high": high,
+            })
+        return waves
+
+    @staticmethod
+    def _locate_wave(current_idx: int, waves: list[dict]) -> int:
+        """判断当前 bar 落在第几波。
+
+        :param current_idx: 当日 K线索引
+        :param waves: _identify_waves 的输出
+        :return: 波数（1, 2, 3, ...）；如果当前在最后一个 swing high 之后，返回 wave_total+1
+        """
+        for w in waves:
+            if current_idx <= w["end_bar"]:
+                return w["wave_idx"]
+        # 当前 bar 在最后一个 swing high 之后 → 新一波
+        return waves[-1]["wave_idx"] + 1
+
+    # ═══════════════════════════════════════════════════════════════
+    # 趋势老化微调（±10分）
+    # ═══════════════════════════════════════════════════════════════
+
+    def _compute_age_adjustment(self, bars: list[dict], direction: str) -> float:
+        """趋势年龄微调（-5 ~ +5）。
+
+        趋势新鲜（<8根）→ +3~+5
+        趋势老化（>20根）→ -3~-5
+        """
         trend_age = self._compute_trend_age(bars, direction)
-        # 趋势持续 1-8 根：新鲜，高分
-        # 趋势持续 9-20 根：成熟，中分
-        # 趋势持续 >20 根：老化，低分
         if trend_age <= 8:
-            age_score = 90 - trend_age * 3  # 87~90
+            return 5.0 - trend_age * 0.2  # +3.4 ~ +5.0
         elif trend_age <= 20:
-            age_score = 60 - (trend_age - 8) * 3  # 24~57
+            return 2.0 - (trend_age - 8) * 0.5  # -4.0 ~ +2.0
         else:
-            age_score = max(10, 24 - (trend_age - 20))  # 递减
+            return max(-5.0, -4.0 - (trend_age - 20) * 0.2)
 
-        # 2. HH Count：连续创新高/新低次数
-        hh_count = self._count_consecutive_extremes(bars, direction)
-        # HH 少（1-3）：趋势早期，高分
-        # HH 多（>6）：可能见顶，低分
-        if hh_count <= 3:
-            hh_score = 90 - hh_count * 5  # 75~90
-        elif hh_count <= 6:
-            hh_score = 60 - (hh_count - 3) * 8  # 36~57
-        else:
-            hh_score = max(10, 36 - (hh_count - 6) * 5)
+    def _compute_volume_adjustment(self, bars: list[dict]) -> float:
+        """量能微调（-5 ~ +5）。
 
-        # 3. ATR Expansion：波动率是否在扩张
-        atr_expansion = self._compute_atr_expansion(bars)
-        if atr_expansion > 1.2:
-            atr_score = 80  # 波动扩张，趋势加速
-        elif atr_expansion > 0.9:
-            atr_score = 60  # 波动稳定
-        else:
-            atr_score = 30  # 波动收缩，趋势衰竭
-
-        # 4. Momentum Decay：最近动量 vs 之前动量
-        momentum_decay = self._compute_momentum_decay(bars)
-        if momentum_decay > 0.8:
-            mom_score = 80  # 动量增强
-        elif momentum_decay > 0.5:
-            mom_score = 50  # 动量稳定
-        else:
-            mom_score = 20  # 动量衰减
-
-        # 5. Volume Decay：成交量是否在衰减
+        放量 → +3~+5（趋势确认）
+        缩量 → -3~-5（趋势衰竭）
+        """
         vol_decay = self._compute_volume_decay(bars)
-        if vol_decay > 1.0:
-            vol_score = 80  # 放量
+        if vol_decay > 1.2:
+            return 5.0
+        elif vol_decay > 1.0:
+            return 3.0
         elif vol_decay > 0.7:
-            vol_score = 50  # 量能稳定
+            return 0.0
         else:
-            vol_score = 25  # 缩量
+            return -5.0
 
-        # 加权平均
-        score = (
-            age_score * 0.25 +
-            hh_score * 0.25 +
-            atr_score * 0.15 +
-            mom_score * 0.20 +
-            vol_score * 0.15
-        )
-
-        return max(0.0, min(100.0, score))
+    # ═══════════════════════════════════════════════════════════════
+    # 辅助计算（保留原 WaveEngine 的趋势老化因子）
+    # ═══════════════════════════════════════════════════════════════
 
     @staticmethod
     def _compute_trend_age(bars: list[dict], direction: str) -> int:
-        """计算当前趋势持续的 K 线数。
-
-        reduce 方向：从最近一根开始往前数，直到价格不再创新高
-        add 方向：从最近一根开始往前数，直到价格不再创新低
-        """
+        """计算当前趋势持续的 K 线数。"""
         if len(bars) < 2:
             return 0
         age = 0
         if direction == "reduce":
-            # 上升趋势：连续创新高
             for i in range(len(bars) - 1, 0, -1):
                 if bars[i].get("high", 0) >= bars[i - 1].get("high", 0):
                     age += 1
                 else:
                     break
         else:
-            # 下降趋势：连续创新低
             for i in range(len(bars) - 1, 0, -1):
                 if bars[i].get("low", 0) <= bars[i - 1].get("low", 0):
                     age += 1
                 else:
                     break
         return age
-
-    @staticmethod
-    def _count_consecutive_extremes(bars: list[dict], direction: str) -> int:
-        """统计连续创新高/新低的次数。"""
-        if len(bars) < 3:
-            return 0
-        count = 0
-        if direction == "reduce":
-            highest = 0
-            for i in range(len(bars) - 1, -1, -1):
-                high = bars[i].get("high", 0)
-                if high > highest:
-                    highest = high
-                    count += 1
-                elif count > 0:
-                    break
-        else:
-            lowest = float("inf")
-            for i in range(len(bars) - 1, -1, -1):
-                low = bars[i].get("low", 0)
-                if low < lowest:
-                    lowest = low
-                    count += 1
-                elif count > 0:
-                    break
-        return min(count, 10)
-
-    @staticmethod
-    def _compute_atr_expansion(bars: list[dict]) -> float:
-        """计算 ATR 扩张比率（最近 5 根 TR 均值 / 之前 20 根 TR 均值）。"""
-        if len(bars) < 25:
-            return 1.0
-        trs = []
-        for i in range(1, len(bars)):
-            high = bars[i].get("high", 0)
-            low = bars[i].get("low", 0)
-            prev_close = bars[i - 1].get("close", 0)
-            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-            trs.append(tr)
-        recent_avg = sum(trs[-5:]) / 5 if len(trs) >= 5 else 1.0
-        prior_avg = sum(trs[-20:-5]) / 15 if len(trs) >= 20 else recent_avg
-        if prior_avg > 0:
-            return recent_avg / prior_avg
-        return 1.0
-
-    @staticmethod
-    def _compute_momentum_decay(bars: list[dict]) -> float:
-        """计算动量衰减比率（最近 5 根 ROC / 之前 5 根 ROC）。"""
-        if len(bars) < 12:
-            return 0.5
-        closes = [b.get("close", 0) for b in bars]
-        # 最近 5 根 ROC
-        recent_roc = (closes[-1] - closes[-6]) / closes[-6] if closes[-6] > 0 else 0
-        # 之前 5 根 ROC
-        prior_roc = (closes[-6] - closes[-11]) / closes[-11] if closes[-11] > 0 else 0
-        if abs(prior_roc) > 0.001:
-            return abs(recent_roc) / abs(prior_roc)
-        return 0.5
 
     @staticmethod
     def _compute_volume_decay(bars: list[dict]) -> float:

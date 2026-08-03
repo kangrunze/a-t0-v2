@@ -1,0 +1,6 @@
+{
+  "_comment": "Stage M0.5 基线组：保持 2026-07-31 之前的回测口径（V3 Engine 在回测中空转）。用于复现历史 tag 的数字。",
+  "sp": {
+    "v3_engines_in_backtest": false
+  }
+}

@@ -131,6 +131,21 @@ class SignalParams:
     # None=平仓用开仓阈值（旧行为，买卖点过近）；float=独立平仓阈值
     v3_alpha_close_threshold: Optional[float] = 85.0
 
+    # ── Stage M0.5: 回测 / 实盘 Engine 通路一致性（2026-07-31）──
+    # 缺陷背景：
+    #   strategy.evaluate_all_signals（实盘路径）调用 compute_alpha_score 时注入
+    #   _bars=bars，alpha_score.compute_alpha_score_v3 据此实例化 G2/G4/G5/G7 Engine；
+    #   而 backtest.py 的 alpha 分支只注入 _direction，未注入 _bars
+    #   → compute_alpha_score_v3 内 `engines = _get_engines() if bars else {}` 取空
+    #   → Support / Wave / ExpectedMove / Regime / Risk 五个 Engine 在回测中从未执行，
+    #     七维度全部退化为 score_*(fv) 的 G1 占位打分。
+    # 后果：任何 Engine 级 A/B 在回测上都是空转。
+    #   实证：w_wave_v1 与 v3_b5_optimized 的 batch_summary 逐笔全等
+    #        （net_pnl 均为 152.14，per_stock 完全一致）。
+    # True  = 回测注入 _bars，与实盘同口径（正确口径，默认）
+    # False = 保留旧回测口径（Engine 空转），仅用于复现 2026-07-31 之前的历史基线
+    v3_engines_in_backtest: bool = True
+
     # ── V4: L4 Expected Move 开仓闸门（Decision Engine，2026-07-30）──
     # 用户方案：Alpha 够用，瓶颈在 Exit。L4 作为开仓闸门防"买晚"：
     #   alpha_score >= alpha_threshold_open 后，额外检查 Expected Move RR
