@@ -44,6 +44,38 @@ def _cached_load_kline(code: str, start_date: str, end_date: str):
     return load_multi_day_zz500(code, start_date, end_date, ZZ500_5MIN_DIR)
 
 
+@st.fragment(run_every=2)
+def _running_status_fragment(run_id: int) -> None:
+    """运行中状态：fragment 局部每 2 秒刷新进度。
+
+    直接查库读取最新状态（绕过 _cached_runs 的 30s ttl 缓存），确保进度实时。
+    当检测到状态离开 running（completed/failed/cancelled）时触发全页 rerun，
+    让上方汇总指标和图表加载最新结果。
+    """
+    from web.results_db import get_run
+    run = get_run(run_id)
+    if run is None:
+        st.warning("运行记录已消失")
+        return
+    if run["status"] != "running":
+        # 状态已变更，触发整页刷新以加载结果
+        st.toast("✅ 回测状态已变更，正在刷新页面...")
+        st.rerun()
+        return
+    prog = run.get("progress", "")
+    st.warning(f"⏳ 回测正在执行中... 进度: {prog}")
+    if prog:
+        parts = prog.split("/")
+        if len(parts) == 2:
+            try:
+                done, total = int(parts[0]), int(parts[1])
+                st.progress(done / total if total > 0 else 0,
+                            text=f"已处理 {done}/{total} 只股票")
+            except ValueError:
+                pass
+    st.caption("⏱️ 每 2 秒自动刷新进度（fragment 局部刷新，不阻塞其他页面交互）")
+
+
 def show() -> None:
     st.title("📈 结果查看")
     st.caption("浏览历史回测运行结果")
@@ -96,21 +128,11 @@ def show() -> None:
             st.metric("耗时", f"{s_duration:.1f}s")
 
     if selected_run["status"] == "running":
-        prog = selected_run.get("progress", "")
-        st.warning(f"⏳ 回测正在执行中... 进度: {prog}")
-        if prog:
-            parts = prog.split("/")
-            if len(parts) == 2:
-                try:
-                    done, total = int(parts[0]), int(parts[1])
-                    st.progress(done / total if total > 0 else 0,
-                                text=f"已处理 {done}/{total} 只股票")
-                except ValueError:
-                    pass
-        st.info("页面将每 2 秒自动刷新（后台任务不阻塞其他页面）...")
-        import time
-        time.sleep(2)
-        st.rerun()
+        # 用 fragment 做局部自动刷新，替代原来的 time.sleep(2)+st.rerun()。
+        # 原写法会同步阻塞主线程 2 秒，期间用户点击得不到响应；且整页 rerun
+        # 会重跑所有上方逻辑。fragment(run_every=2) 只重跑这个小函数，
+        # 主线程不阻塞，其他页面交互即时响应。
+        _running_status_fragment(selected_run_id)
         return
 
     if selected_run["status"] == "failed":
@@ -382,8 +404,13 @@ def _show_equity_curve(selected_run: dict, results: list[dict], run_id: int) -> 
 # ═══════════════════════════════════════════════════════════════
 # K线图 + 交易标记
 # ═══════════════════════════════════════════════════════════════
+@st.fragment
 def _show_kline_tab(selected_run: dict, results: list[dict], run_id: int) -> None:
-    """显示个股 K 线图与交易标记。"""
+    """显示个股 K 线图与交易标记。
+
+    用 @st.fragment 包裹：切股票 / 切均线开关 / 拖日期范围时只局部重跑本函数，
+    不触发整页 rerun，避免上方汇总指标、汇总表格跟着重算。
+    """
     st.subheader("个股 K 线图")
 
     if not results:
@@ -409,7 +436,11 @@ def _show_kline_tab(selected_run: dict, results: list[dict], run_id: int) -> Non
     start_date = selected_run.get("start_date", "2023-07-25")[:10]
     end_date = selected_run.get("end_date", "2026-07-22")[:10]
 
-    with st.spinner(f"正在加载 {selected_code} 的 K 线数据..."):
+    # 用 st.status 替代 st.spinner：显示带步骤的"正在读数据"反馈，
+    # 让用户明确感知是"在读 3 年 5min JSON"而非"卡住了"。
+    with st.status(f"正在加载 {selected_code} 的 K 线数据（{start_date} ~ {end_date}）...",
+                   expanded=True) as status:
+        st.caption("从磁盘读取 5 分钟 K 线 JSON 并聚合为日线 OHLCV...")
         try:
             daily_bars, daily_prev, _ = _cached_load_kline(
                 selected_code, start_date, end_date,
@@ -417,6 +448,8 @@ def _show_kline_tab(selected_run: dict, results: list[dict], run_id: int) -> Non
         except Exception as e:
             st.error(f"加载 K 线数据失败: {e}")
             return
+        status.update(label=f"K 线数据加载完成（{len(daily_bars)} 个交易日）",
+                      state="complete", expanded=False)
 
     if not daily_bars:
         st.warning(f"未找到 {selected_code} 在 {start_date} ~ {end_date} 范围内的 K 线数据")

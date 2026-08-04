@@ -1,0 +1,28 @@
+# QuantWeb — A-T0 回测平台依赖
+#
+# 安装: pip install -r requirements.txt
+# 启动: flask --app web.app run --port 8501
+#
+# Python >= 3.10
+
+# ── Web 平台（必装）──
+# Flask 3.0+: 应用框架
+flask>=3.0.0
+# Jinja2: 模板引擎（Flask 依赖，显式列出）
+jinja2>=3.1.0
+# plotly: K线图 / 雷达图 / 散点图 / 资金曲线
+plotly>=5.18.0
+# pandas: DataFrame 渲染与指标聚合
+pandas>=2.0.0
+# pyyaml: thresholds.yaml 读写（参数配置页）
+pyyaml>=6.0
+
+# ── 策略核心（回测引擎依赖）──
+numpy>=1.24.0
+
+# ── 数据源（按需安装，本地已有 5min JSON 可不装）──
+# mootdx  # 实时行情
+# baostock  # 日线补充
+
+# ── 旧版 Streamlit（Sprint 5 前保留，用于回退验证）──
+# streamlit>=1.33.0

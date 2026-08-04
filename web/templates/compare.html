@@ -1,0 +1,352 @@
+{% extends "base.html" %}
+{% block title %}策略对比{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>策略对比</h2>
+    <div class="caption">A/B 测试对比 · Stage Gate 判定 · 显著性检验</div>
+</div>
+
+{# ── 对比模式选择 ── #}
+<div class="card">
+    <div class="card-body">
+        <div class="card-title">对比模式</div>
+        <div class="btn-group mb-3" role="group">
+            <button type="button" class="btn btn-outline-secondary active" id="mode-manual">
+                <i class="bi bi-list-check"></i> 手动选择运行
+            </button>
+            <button type="button" class="btn btn-outline-secondary" id="mode-group">
+                <i class="bi bi-tags"></i> 按标签分组
+            </button>
+        </div>
+
+        {# ── 手动模式 ── #}
+        <div id="panel-manual">
+            <div class="mb-2">
+                <label class="form-label">选择 2-4 次已完成运行</label>
+                <div id="run-selector" class="border rounded p-2" style="max-height:240px;overflow-y:auto;">
+                    <p class="text-secondary">加载中…</p>
+                </div>
+            </div>
+            <button id="btn-compare-manual" class="btn btn-up" disabled>
+                <i class="bi bi-arrow-left-right"></i> 开始对比
+            </button>
+        </div>
+
+        {# ── 分组模式 ── #}
+        <div id="panel-group" style="display:none;">
+            <div class="row g-2 mb-2">
+                <div class="col">
+                    <label class="form-label">标签 A（基准）</label>
+                    <select class="form-select" id="tag-a"><option>加载中…</option></select>
+                </div>
+                <div class="col">
+                    <label class="form-label">标签 B（对比）</label>
+                    <select class="form-select" id="tag-b"><option>加载中…</option></select>
+                </div>
+            </div>
+            <button id="btn-compare-group" class="btn btn-up">
+                <i class="bi bi-arrow-left-right"></i> 分组对比
+            </button>
+        </div>
+    </div>
+</div>
+
+{# ── 对比结果容器 ── #}
+<div id="comparison-results">
+    <div class="card">
+        <div class="card-body text-center py-5">
+            <i class="bi bi-arrow-left-right" style="font-size:2rem;color:var(--color-text-secondary);"></i>
+            <p class="text-secondary mt-2">选择运行后点击"开始对比"</p>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ── 状态 ──
+var selectedRunIds = [];
+var allRuns = [];
+
+// ── 加载运行列表 ──
+function loadRuns() {
+    fetch('/api/compare/runs')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            allRuns = data.runs || [];
+            renderRunSelector();
+        });
+}
+
+function loadTags() {
+    fetch('/api/compare/tags')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var tags = data.tags || [];
+            var selA = document.getElementById('tag-a');
+            var selB = document.getElementById('tag-b');
+            selA.innerHTML = '<option value="">— 选择标签 —</option>';
+            selB.innerHTML = '<option value="">— 选择标签 —</option>';
+            tags.forEach(function(t) {
+                selA.innerHTML += '<option value="' + t + '">' + t + '</option>';
+                selB.innerHTML += '<option value="' + t + '">' + t + '</option>';
+            });
+        });
+}
+
+function renderRunSelector() {
+    var container = document.getElementById('run-selector');
+    if (allRuns.length === 0) {
+        container.innerHTML = '<p class="text-secondary">暂无已完成运行。</p>';
+        return;
+    }
+    var html = '';
+    allRuns.forEach(function(r) {
+        var checked = selectedRunIds.indexOf(r.id) >= 0 ? 'checked' : '';
+        html += '<div class="form-check">' +
+            '<input class="form-check-input run-checkbox" type="checkbox" value="' + r.id + '" ' + checked + ' id="run-' + r.id + '">' +
+            '<label class="form-check-label" for="run-' + r.id + '">' +
+            '<span class="num-mono">#' + r.id + '</span> ' + r.name +
+            ' <span class="text-secondary">' + r.created_at + '</span>' +
+            ' <span class="badge bg-light text-secondary">' + (r.stock_pool || '—') + '</span>' +
+            '</label></div>';
+    });
+    container.innerHTML = html;
+
+    // 绑定事件
+    container.querySelectorAll('.run-checkbox').forEach(function(cb) {
+        cb.addEventListener('change', function() {
+            var id = parseInt(this.value);
+            var idx = selectedRunIds.indexOf(id);
+            if (this.checked) {
+                if (idx < 0) selectedRunIds.push(id);
+            } else {
+                if (idx >= 0) selectedRunIds.splice(idx, 1);
+            }
+            // 多选限制
+            if (selectedRunIds.length > 4) {
+                this.checked = false;
+                selectedRunIds.splice(selectedRunIds.indexOf(id), 1);
+                alert('最多选择 4 次运行');
+            }
+            document.getElementById('btn-compare-manual').disabled = selectedRunIds.length < 2;
+        });
+    });
+}
+
+// ── 对比结果渲染 ──
+function renderComparison(data) {
+    var container = document.getElementById('comparison-results');
+
+    if (data.error) {
+        container.innerHTML = '<div class="card"><div class="card-body"><p class="text-danger">' + data.error + '</p></div></div>';
+        return;
+    }
+
+    var html = '';
+
+    // ── 各运行概览 ──
+    if (data.runs) {
+        html += '<div class="card"><div class="card-body"><div class="card-title">各运行指标</div>';
+        html += '<div class="table-responsive"><table class="table table-hover"><thead><tr><th>运行</th><th>Gate</th><th>样本量</th><th>total net</th><th>median net</th><th>mean net</th><th>median CE</th><th>median WR</th><th>median PF</th></tr></thead><tbody>';
+        data.runs.forEach(function(r) {
+            var gateClass = r.gate === 'PASS' ? 'text-up' : (r.gate === 'FAIL' ? 'text-down' : 'text-warning');
+            var netClass = r.median_net >= 0 ? 'text-up' : 'text-down';
+            html += '<tr><td><strong>' + r.name + '</strong></td>' +
+                '<td><span class="' + gateClass + '"><strong>' + r.gate + '</strong></span></td>' +
+                '<td class="num-mono">' + r.n_samples + '</td>' +
+                '<td class="num-mono ' + netClass + '">' + fmt(r.total_net) + '</td>' +
+                '<td class="num-mono ' + netClass + '">' + fmt(r.median_net) + '</td>' +
+                '<td class="num-mono ' + netClass + '">' + fmt(r.mean_net) + '</td>' +
+                '<td class="num-mono">' + fmtPct(r.median_ce) + '</td>' +
+                '<td class="num-mono">' + fmtPct(r.median_wr) + '</td>' +
+                '<td class="num-mono">' + (r.median_pf > 0 ? r.median_pf.toFixed(2) : '—') + '</td></tr>';
+        });
+        html += '</tbody></table></div></div></div>';
+    }
+
+    // ── 两两对比 ──
+    if (data.comparisons) {
+        data.comparisons.forEach(function(c, ci) {
+            html += '<div class="card mt-3"><div class="card-body">';
+            html += '<div class="card-title">对比: ' + c.base_name + ' → ' + c.other_name + '</div>';
+
+            // Stage Gate 对比
+            html += '<div class="row g-2 mb-3">';
+            html += '<div class="col-md-6"><div class="metric-card"><div class="label">基准 Gate</div><div class="value ' + (c.base.gate === 'PASS' ? 'text-up' : (c.base.gate === 'FAIL' ? 'text-down' : 'text-warning')) + '">' + c.base.gate + '</div><div class="sublabel">' + c.base.gate_reason + '</div></div></div>';
+            html += '<div class="col-md-6"><div class="metric-card"><div class="label">对比 Gate</div><div class="value ' + (c.other.gate === 'PASS' ? 'text-up' : (c.other.gate === 'FAIL' ? 'text-down' : 'text-warning')) + '">' + c.other.gate + '</div><div class="sublabel">' + c.other.gate_reason + '</div></div></div>';
+            html += '</div>';
+
+            // 指标对比表
+            html += '<div class="card-title mt-3">指标对比</div>';
+            html += '<div class="table-responsive"><table class="table table-hover"><thead><tr><th>指标</th><th>' + c.base_name + '</th><th>' + c.other_name + '</th><th>差值</th></tr></thead><tbody>';
+            var metricLabels = {
+                'total_net': '总净盈亏', 'median_net': '中位数净盈亏', 'mean_net': '均值净盈亏',
+                'median_ce': '中位数 CE', 'mean_ce': '均值 CE',
+                'median_wr': '中位数胜率', 'mean_wr': '均值胜率',
+                'median_pf': '中位数 PF', 'median_payoff': '中位数盈亏比'
+            };
+            c.metric_diffs.forEach(function(m) {
+                var label = metricLabels[m.metric] || m.metric;
+                var diffClass = m.diff > 0.01 ? 'text-up' : (m.diff < -0.01 ? 'text-down' : '');
+                var bv = typeof m.base === 'number' ? m.base.toFixed(4) : m.base;
+                var ov = typeof m.other === 'number' ? m.other.toFixed(4) : m.other;
+                var dv = typeof m.diff === 'number' ? m.diff.toFixed(4) : m.diff;
+                // CE 和 WR 显示为百分比
+                if (m.metric.indexOf('ce') >= 0 || m.metric.indexOf('wr') >= 0) {
+                    bv = (m.base * 100).toFixed(2) + '%';
+                    ov = (m.other * 100).toFixed(2) + '%';
+                    dv = (m.diff * 100).toFixed(2) + '%';
+                }
+                html += '<tr><td>' + label + '</td><td class="num-mono">' + bv + '</td><td class="num-mono">' + ov + '</td><td class="num-mono ' + diffClass + '">' + dv + '</td></tr>';
+            });
+            html += '</tbody></table></div>';
+
+            // 共同股票数
+            html += '<p class="text-secondary">共同股票: <span class="num-mono">' + c.common_stocks + '</span></p>';
+
+            // Wilcoxon 检验结果
+            html += '<div class="card-title mt-3">显著性检验 (Wilcoxon signed-rank)</div>';
+            var w = c.wilcoxon;
+            if (w.significant === true) {
+                html += '<div class="text-up"><strong>' + w.conclusion + '</strong> (n=' + w.n_pairs + ', 非零差=' + w.nonzero_pairs + ')</div>';
+            } else if (w.significant === false) {
+                html += '<div class="text-secondary">' + w.conclusion + ' (n=' + w.n_pairs + ')</div>';
+            } else {
+                html += '<div class="text-warning">' + w.conclusion + ' (n=' + (w.n_pairs || 0) + ')</div>';
+            }
+            html += '<div class="text-secondary" style="font-size:0.75rem;">p-value: ' + (w.p_value !== null && w.p_value !== undefined ? w.p_value : 'N/A') + ' | statistic: ' + (w.statistic !== null && w.statistic !== undefined ? w.statistic : 'N/A') + '</div>';
+
+            html += '</div></div>';
+        });
+    }
+
+    // ── 分组对比结果 ──
+    if (data.base && data.other) {
+        html += '<div class="card mt-3"><div class="card-body">';
+        html += '<div class="card-title">分组对比: ' + data.base_name + ' → ' + data.other_name + '</div>';
+
+        // 类似的两两对比展示
+        var c = data;
+        html += '<div class="row g-2 mb-3">';
+        html += '<div class="col-md-6"><div class="metric-card"><div class="label">标签 A Gate</div><div class="value ' + (c.base.gate === 'PASS' ? 'text-up' : (c.base.gate === 'FAIL' ? 'text-down' : 'text-warning')) + '">' + c.base.gate + '</div><div class="sublabel">' + c.base.gate_reason + '</div></div></div>';
+        html += '<div class="col-md-6"><div class="metric-card"><div class="label">标签 B Gate</div><div class="value ' + (c.other.gate === 'PASS' ? 'text-up' : (c.other.gate === 'FAIL' ? 'text-down' : 'text-warning')) + '">' + c.other.gate + '</div><div class="sublabel">' + c.other.gate_reason + '</div></div></div>';
+        html += '</div>';
+
+        html += '<div class="table-responsive"><table class="table table-hover"><thead><tr><th>指标</th><th>' + c.base_name + '</th><th>' + c.other_name + '</th><th>差值</th></tr></thead><tbody>';
+        var metricLabels2 = {
+            'total_net': '总净盈亏', 'median_net': '中位数净盈亏', 'mean_net': '均值净盈亏',
+            'median_ce': '中位数 CE', 'mean_ce': '均值 CE',
+            'median_wr': '中位数胜率', 'mean_wr': '均值胜率',
+            'median_pf': '中位数 PF', 'median_payoff': '中位数盈亏比'
+        };
+        (c.metric_diffs || []).forEach(function(m) {
+            var label = metricLabels2[m.metric] || m.metric;
+            var diffClass = m.diff > 0.01 ? 'text-up' : (m.diff < -0.01 ? 'text-down' : '');
+            var bv = typeof m.base === 'number' ? m.base.toFixed(4) : m.base;
+            var ov = typeof m.other === 'number' ? m.other.toFixed(4) : m.other;
+            var dv = typeof m.diff === 'number' ? m.diff.toFixed(4) : m.diff;
+            if (m.metric.indexOf('ce') >= 0 || m.metric.indexOf('wr') >= 0) {
+                bv = (m.base * 100).toFixed(2) + '%';
+                ov = (m.other * 100).toFixed(2) + '%';
+                dv = (m.diff * 100).toFixed(2) + '%';
+            }
+            html += '<tr><td>' + label + '</td><td class="num-mono">' + bv + '</td><td class="num-mono">' + ov + '</td><td class="num-mono ' + diffClass + '">' + dv + '</td></tr>';
+        });
+        html += '</tbody></table></div>';
+
+        html += '<p class="text-secondary">共同股票: <span class="num-mono">' + (c.common_stocks || 0) + '</span></p>';
+
+        var w = c.wilcoxon || {};
+        html += '<div class="card-title mt-3">显著性检验 (Wilcoxon signed-rank)</div>';
+        if (w.significant === true) {
+            html += '<div class="text-up"><strong>' + w.conclusion + '</strong></div>';
+        } else if (w.significant === false) {
+            html += '<div class="text-secondary">' + w.conclusion + '</div>';
+        } else {
+            html += '<div class="text-warning">' + (w.conclusion || 'N/A') + '</div>';
+        }
+
+        html += '</div></div>';
+    }
+
+    container.innerHTML = html;
+}
+
+// ── 数字格式化 ──
+function fmt(val) {
+    if (val === null || val === undefined || val === '—') return '—';
+    var num = typeof val === 'string' ? parseFloat(val) : val;
+    if (isNaN(num)) return '—';
+    var abs = Math.abs(num);
+    var sign = num >= 0 ? '+' : '-';
+    var parts = abs.toFixed(2).split('.');
+    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return sign + parts.join('.');
+}
+
+function fmtPct(val) {
+    if (val === null || val === undefined) return '—';
+    var pct = val * 100;
+    var sign = pct >= 0 ? '+' : '';
+    return sign + pct.toFixed(2) + '%';
+}
+
+// ── 事件绑定 ──
+document.addEventListener('DOMContentLoaded', function() {
+    loadRuns();
+    loadTags();
+
+    // 模式切换
+    document.getElementById('mode-manual').addEventListener('click', function() {
+        document.getElementById('mode-manual').classList.add('active');
+        document.getElementById('mode-group').classList.remove('active');
+        document.getElementById('panel-manual').style.display = '';
+        document.getElementById('panel-group').style.display = 'none';
+    });
+    document.getElementById('mode-group').addEventListener('click', function() {
+        document.getElementById('mode-group').classList.add('active');
+        document.getElementById('mode-manual').classList.remove('active');
+        document.getElementById('panel-group').style.display = '';
+        document.getElementById('panel-manual').style.display = 'none';
+    });
+
+    // 手动对比
+    document.getElementById('btn-compare-manual').addEventListener('click', function() {
+        if (selectedRunIds.length < 2) return;
+        var container = document.getElementById('comparison-results');
+        container.innerHTML = '<div class="card"><div class="card-body text-center py-4"><div class="spinner-border text-secondary" role="status"></div><p class="mt-2 text-secondary">正在计算对比…</p></div></div>';
+        fetch('/api/compare/run', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({run_ids: selectedRunIds}),
+        })
+            .then(function(r) { return r.json(); })
+            .then(function(data) { renderComparison(data); })
+            .catch(function() {
+                container.innerHTML = '<div class="card"><div class="card-body"><p class="text-danger">对比请求失败</p></div></div>';
+            });
+    });
+
+    // 分组对比
+    document.getElementById('btn-compare-group').addEventListener('click', function() {
+        var tagA = document.getElementById('tag-a').value;
+        var tagB = document.getElementById('tag-b').value;
+        if (!tagA || !tagB) { alert('请选择两个标签'); return; }
+        var container = document.getElementById('comparison-results');
+        container.innerHTML = '<div class="card"><div class="card-body text-center py-4"><div class="spinner-border text-secondary" role="status"></div><p class="mt-2 text-secondary">正在计算分组对比…</p></div></div>';
+        fetch('/api/compare/group', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({tag_a: tagA, tag_b: tagB}),
+        })
+            .then(function(r) { return r.json(); })
+            .then(function(data) { renderComparison(data); })
+            .catch(function() {
+                container.innerHTML = '<div class="card"><div class="card-body"><p class="text-danger">对比请求失败</p></div></div>';
+            });
+    });
+});
+</script>
+{% endblock %}

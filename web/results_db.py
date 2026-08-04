@@ -21,9 +21,22 @@ DB_PATH = Path(__file__).resolve().parent.parent / "data" / "quantweb.db"
 
 
 def get_conn() -> sqlite3.Connection:
+    """获取数据库连接。
+
+    并发策略：
+      - WAL 模式：读写可并发，后台写线程（回测进度/结果）不会阻塞前台读请求。
+        默认 rollback-journal 模式会给整个 db 文件加写锁，导致"回测跑着时
+        点哪儿都慢"（读请求撞写锁，默认 5s 超时才返回）。
+      - busy_timeout=3000：万一仍撞锁，最多等 3 秒而非默认 5 秒，兜底。
+      - timeout=3.0：connect 层面的等锁超时，与 busy_timeout 协同。
+    每个连接独立设置 PRAGMA：SQLite 的 journal_mode 是数据库级持久属性
+    （第一次设为 WAL 后会持久生效），但 busy_timeout 是连接级，必须每连接设。
+    """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=3.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=3000")
     return conn
 
 
@@ -115,6 +128,13 @@ def init_db() -> None:
         conn.execute("ALTER TABLE runs ADD COLUMN cancelled INTEGER DEFAULT 0")
     except Exception:
         pass
+
+    # 外键索引：get_run_results / get_run_summary 按 run_id 过滤，
+    # 无索引会退化成全表扫描（数据量小暂时无感，运行次数多后变慢）。
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_results_run_id ON results(run_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_results_result_id ON daily_results(result_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_optuna_study ON optuna_trials(study_name)")
 
     conn.commit()
     conn.close()
@@ -238,6 +258,41 @@ def get_run_results(run_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_runs_by_ids(run_ids: list[int]) -> list[dict]:
+    """批量获取指定 ID 的运行记录。"""
+    if not run_ids:
+        return []
+    conn = get_conn()
+    placeholders = ",".join("?" for _ in run_ids)
+    rows = conn.execute(
+        f"SELECT * FROM runs WHERE id IN ({placeholders}) ORDER BY id DESC",
+        run_ids,
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_runs_by_tag(tag: str, limit: int = 50) -> list[dict]:
+    """按标签获取运行记录。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM runs WHERE tag = ? ORDER BY id DESC LIMIT ?",
+        (tag, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_run_tags() -> list[str]:
+    """获取所有不同的 tag 值。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT DISTINCT tag FROM runs WHERE tag IS NOT NULL AND tag != '' ORDER BY tag"
+    ).fetchall()
+    conn.close()
+    return [r["tag"] for r in rows]
+
+
 def get_run_summary(run_id: int) -> dict | None:
     """获取某次运行的整体汇总。"""
     results = get_run_results(run_id)
@@ -284,6 +339,41 @@ def get_optuna_best(study_name: str) -> dict | None:
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def get_optuna_studies() -> list[dict]:
+    """获取所有 unique study 名称及 trial 数、最佳 objective。"""
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT study_name,
+               COUNT(*) AS trial_count,
+               MAX(objective) AS best_objective,
+               MAX(created_at) AS last_run
+        FROM optuna_trials
+        GROUP BY study_name
+        ORDER BY last_run DESC
+    """).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_optuna_trials(study_name: str, limit: int = 200) -> list[dict]:
+    """获取某 study 的所有 trial 记录。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM optuna_trials WHERE study_name = ? ORDER BY trial_number ASC LIMIT ?",
+        (study_name, limit),
+    ).fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["params"] = json.loads(d["params"]) if d.get("params") else {}
+        except (json.JSONDecodeError, TypeError):
+            d["params"] = {}
+        result.append(d)
+    return result
 
 
 # ── 参数预设 ──

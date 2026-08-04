@@ -109,8 +109,13 @@ def compute_unrealized_pnl(
 # 频率推断（P0-6: 供 _judge_trend_context 自适应 min_bars_for_trend）
 # ═══════════════════════════════════════════════════════════════
 def _to_minutes(s: str) -> int:
-    """解析 "HH:MM:SS" 或 "HH:MM" 为从午夜开始的分钟数。"""
-    parts = str(s).split(":")
+    """
+    NEW-1 FIX: parse "YYYY-MM-DD HH:MM:SS" by stripping date prefix first.
+    """
+    s = str(s)
+    if " " in s:
+        s = s.split(" ", 1)[1]
+    parts = s.split(":")
     if len(parts) >= 2:
         try:
             return int(parts[0]) * 60 + int(parts[1])
@@ -1189,6 +1194,12 @@ def _execute_trade(
         base_shares=state.base_shares,
         l1_systemic_risk=l1_systemic_risk,
         theme_retreated=theme_retreated,
+        # M15: 预期价差/净收益检查统一由 approve_signal 处理
+        signal_price=price,
+        reference_price=ref_price,
+        cost_model=cost_model,
+        risk_params=params.risk_params,
+        is_pairing=signal.is_pairing,
     )
     if not decision.approved:
         return
@@ -1196,15 +1207,6 @@ def _execute_trade(
     shares = decision.adjusted_shares
     if shares <= 0:
         return
-
-    # 预期价差检查（使用统一成本模型的净收益率）
-    # 平仓（is_pairing）跳过 min_capture_spread：平仓时价格已回归 VWAP 附近，
-    # |price - vwap| 小，该检查对平仓无意义（平仓的盈利来自开仓价与平仓价的价差，
-    # 不是当前价与 vwap 的偏离）。开仓仍需检查（确保在极端开仓）。
-    expected_spread = abs(price - ref_price) / ref_price if ref_price > 0 else 0.0
-    if ref_price > 0 and not signal.is_pairing:
-        if expected_spread < params.risk_params.min_capture_spread:
-            return
 
     # ── 第2步：成交模拟（CostModel 统一处理滑点+成本）──
     fill_price = cost_model.fill_price(direction, price)
@@ -1240,7 +1242,9 @@ def _execute_trade(
     trade_record["rules_score"] = signal.rules_score
     trade_record["rules_fired"] = signal.rules_fired
     trade_record["vwap"] = ref_price
-    trade_record["expected_spread"] = expected_spread if ref_price > 0 else 0
+    # 预期价差（仅用于记录，风控检查已由 approve_signal 完成）
+    rec_spread = abs(price - ref_price) / ref_price if ref_price > 0 else 0.0
+    trade_record["expected_spread"] = rec_spread
 
     # ── Stage M0 Trade Event Logger ──
     # 把当根K线的引擎上下文快照进成交记录。只取与本次成交方向对应的一侧，

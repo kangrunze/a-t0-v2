@@ -1,0 +1,294 @@
+{% extends "base.html" %}
+{% block title %}运行详情 #{{ run_id }}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>运行详情 <span class="num-mono text-secondary" style="font-size:1rem;">#{{ run_id }}</span></h2>
+    <div class="caption">Stage Gate 判定 · 汇总指标 · 个股明细 · K 线图</div>
+</div>
+
+{# ── 锚点导航 ── #}
+<nav class="anchor-nav">
+    <a href="#stage-gate">Stage Gate</a>
+    <a href="#summary">汇总指标</a>
+    <a href="#stocks">个股明细</a>
+    <a href="#kline">K 线图</a>
+    <a href="#equity">资金曲线</a>
+</nav>
+
+{# ── Stage Gate ── #}
+<section id="stage-gate" class="mb-4">
+    <div class="card">
+        <div class="card-body">
+            <div class="card-title">Stage Gate 判定</div>
+            <div id="gate-content">
+                <p class="text-secondary">加载中…</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+{# ── 汇总指标 ── #}
+<section id="summary" class="mb-4">
+    <div class="card">
+        <div class="card-body">
+            <div class="card-title">汇总指标</div>
+            <div class="metric-grid" id="summary-metrics">
+                <div class="metric-card">
+                    <div class="label">总净盈亏</div>
+                    <div class="value" id="total-net">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">中位数净盈亏</div>
+                    <div class="value" id="median-net">—</div>
+                    <div class="sublabel">mean: <span id="mean-net">—</span></div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">中位数胜率</div>
+                    <div class="value" id="median-wr">—</div>
+                    <div class="sublabel">mean: <span id="mean-wr">—</span></div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">中位数 CE</div>
+                    <div class="value" id="median-ce">—</div>
+                    <div class="sublabel">mean: <span id="mean-ce">—</span></div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">中位数 Profit Factor</div>
+                    <div class="value" id="median-pf">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="label">中位数盈亏比</div>
+                    <div class="value" id="median-payoff">—</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+{# ── 个股明细 ── #}
+<section id="stocks" class="mb-4">
+    <div class="card">
+        <div class="card-body">
+            <div class="card-title">个股明细</div>
+            <div class="mb-2">
+                <input type="text" id="stock-filter" class="form-control" placeholder="筛选股票代码…" style="max-width:300px;">
+            </div>
+            <div style="overflow-x:auto;">
+                <table class="table table-hover" id="stock-table">
+                    <thead>
+                        <tr>
+                            <th>代码</th>
+                            <th>配对交易</th>
+                            <th>胜率</th>
+                            <th>净盈亏</th>
+                            <th>Profit Factor</th>
+                            <th>盈亏比</th>
+                            <th>CE(%)</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="stock-tbody">
+                        <tr><td colspan="8" class="text-secondary text-center">加载中…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</section>
+
+{# ── K 线图 ── #}
+<section id="kline" class="mb-4">
+    <div class="card">
+        <div class="card-body">
+            <div class="card-title">K 线图</div>
+            <div class="row g-2 mb-2">
+                <div class="col-auto">
+                    <select id="kline-code" class="form-select" style="min-width:160px;">
+                        <option value="">— 选择股票 —</option>
+                    </select>
+                </div>
+                <div class="col-auto">
+                    <button id="kline-load" class="btn btn-outline-secondary" data-run-id="{{ run_id }}">
+                        <i class="bi bi-search"></i> 加载 K 线
+                    </button>
+                </div>
+            </div>
+            <div id="kline-chart" class="chart-container" style="height:400px;">
+                <p class="text-secondary text-center py-5">选择股票后点击"加载 K 线"</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+{# ── 资金曲线 ── #}
+<section id="equity" class="mb-4">
+    <div class="card">
+        <div class="card-body">
+            <div class="card-title">资金曲线</div>
+            <div id="equity-chart" class="chart-container" style="height:300px;">
+                <p class="text-secondary text-center py-5">运行数据加载中…</p>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ── 数字格式化 ──
+function fmt(val, isPct) {
+    if (val === null || val === undefined || val === '—') return '—';
+    var num = typeof val === 'string' ? parseFloat(val) : val;
+    if (isNaN(num)) return '—';
+    if (isPct) {
+        var pct = (num * 100).toFixed(2);
+        var sign = num >= 0 ? '+' : '';
+        return sign + pct + '%';
+    }
+    var abs = Math.abs(num);
+    var sign = num >= 0 ? '+' : '-';
+    var parts = abs.toFixed(2).split('.');
+    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return sign + parts.join('.');
+}
+
+function fmtPct(num) {
+    if (num === null || num === undefined) return '—';
+    var abs = Math.abs(num);
+    var sign = num >= 0 ? '+' : '';
+    return sign + abs.toFixed(2) + '%';
+}
+
+// ── 加载汇总数据 ──
+document.addEventListener('DOMContentLoaded', function() {
+    fetch('/api/runs/{{ run_id }}/summary')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.error) {
+                document.getElementById('summary-metrics').innerHTML =
+                    '<p class="text-danger">' + data.error + '</p>';
+                document.getElementById('gate-content').innerHTML =
+                    '<p class="text-danger">' + data.error + '</p>';
+                return;
+            }
+
+            // Stage Gate
+            var gateHtml = '';
+            if (data.gate === 'PASS') {
+                gateHtml = '<div class="d-flex align-items-center gap-2"><span class="badge" style="background:#10b981;font-size:1rem;">PASS</span><span class="text-secondary">' + data.gate_reason + ' | 样本量: ' + data.n_samples + '</span></div>';
+            } else if (data.gate === 'FAIL') {
+                gateHtml = '<div class="d-flex align-items-center gap-2"><span class="badge" style="background:#ef4444;font-size:1rem;">FAIL</span><span class="text-secondary">' + data.gate_reason + ' | 样本量: ' + data.n_samples + '</span></div>';
+            } else {
+                gateHtml = '<div class="d-flex align-items-center gap-2"><span class="badge" style="background:#f59e0b;font-size:1rem;">INCONCLUSIVE</span><span class="text-secondary">' + data.gate_reason + '</span></div>';
+            }
+            document.getElementById('gate-content').innerHTML = gateHtml;
+
+            // Summary
+            var s = data.summary;
+            document.getElementById('total-net').textContent = fmt(s.total_net);
+            document.getElementById('total-net').className = 'value ' + (s.total_net >= 0 ? 'text-up' : 'text-down');
+            document.getElementById('median-net').textContent = fmt(s.median_net);
+            document.getElementById('median-net').className = 'value ' + (s.median_net >= 0 ? 'text-up' : 'text-down');
+            document.getElementById('mean-net').textContent = fmt(s.mean_net);
+            document.getElementById('mean-net').className = s.mean_net >= 0 ? 'text-up' : 'text-down';
+            document.getElementById('median-wr').textContent = fmtPct(s.median_wr);
+            document.getElementById('mean-wr').textContent = fmtPct(s.mean_wr);
+            document.getElementById('median-ce').textContent = fmtPct(s.median_ce);
+            document.getElementById('mean-ce').textContent = fmtPct(s.mean_ce);
+            document.getElementById('median-pf').textContent = s.median_pf > 0 ? s.median_pf.toFixed(2) : '—';
+            document.getElementById('median-payoff').textContent = s.median_payoff > 0 ? s.median_payoff.toFixed(2) : '—';
+
+            // 个股明细
+            var tbody = document.getElementById('stock-tbody');
+            if (data.stocks && data.stocks.length > 0) {
+                var rows = '';
+                data.stocks.forEach(function(stk) {
+                    var pnlClass = stk.net_pnl >= 0 ? 'text-up' : 'text-down';
+                    var wrClass = stk.win_rate >= 50 ? 'text-up' : 'text-down';
+                    rows += '<tr>' +
+                        '<td class="num-mono"><strong>' + stk.code + '</strong></td>' +
+                        '<td class="num-mono">' + stk.paired_trades + '</td>' +
+                        '<td class="num-mono ' + wrClass + '">' + stk.win_rate + '%</td>' +
+                        '<td class="num-mono ' + pnlClass + '">' + fmt(stk.net_pnl) + '</td>' +
+                        '<td class="num-mono">' + (stk.profit_factor > 0 ? stk.profit_factor.toFixed(2) : '—') + '</td>' +
+                        '<td class="num-mono">' + (stk.payoff_ratio > 0 ? stk.payoff_ratio.toFixed(2) : '—') + '</td>' +
+                        '<td class="num-mono">' + (stk.avg_ce ? stk.avg_ce.toFixed(2) + '%' : '—') + '</td>' +
+                        '<td><button class="btn btn-outline-secondary btn-sm load-kline-btn" data-code="' + stk.code + '"><i class="bi bi-graph-up"></i> K线</button></td>' +
+                        '</tr>';
+                });
+                tbody.innerHTML = rows;
+
+                // 填充 K 线选择器
+                var sel = document.getElementById('kline-code');
+                data.stocks.forEach(function(stk) {
+                    var opt = document.createElement('option');
+                    opt.value = stk.code;
+                    opt.textContent = stk.code;
+                    sel.appendChild(opt);
+                });
+
+                // 点击 K线按钮
+                document.querySelectorAll('.load-kline-btn').forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        document.getElementById('kline-code').value = btn.getAttribute('data-code');
+                        document.getElementById('kline-load').click();
+                    });
+                });
+            } else {
+                tbody.innerHTML = '<tr><td colspan="8" class="text-secondary text-center">暂无个股数据</td></tr>';
+            }
+        })
+        .catch(function() {
+            document.getElementById('summary-metrics').innerHTML =
+                '<p class="text-danger">数据加载失败</p>';
+            document.getElementById('gate-content').innerHTML =
+                '<p class="text-danger">数据加载失败</p>';
+        });
+
+    // ── 筛选 ──
+    document.getElementById('stock-filter').addEventListener('input', function() {
+        var q = this.value.toLowerCase();
+        document.querySelectorAll('#stock-tbody tr').forEach(function(tr) {
+            var code = tr.querySelector('td');
+            if (!code) return;
+            tr.style.display = code.textContent.toLowerCase().includes(q) ? '' : 'none';
+        });
+    });
+});
+
+// ── K 线图加载 ──
+document.addEventListener('DOMContentLoaded', function() {
+    document.getElementById('kline-load').addEventListener('click', function() {
+        var code = document.getElementById('kline-code').value;
+        if (!code) return;
+        var runId = this.getAttribute('data-run-id');
+        var container = document.getElementById('kline-chart');
+        container.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-secondary" role="status"></div><p class="mt-2 text-secondary">正在加载 K 线数据…</p></div>';
+        fetch('/api/runs/' + runId + '/kline/' + code)
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.html) {
+                    container.innerHTML = data.html;
+                    // 重新执行 Plotly 脚本
+                    var scripts = container.querySelectorAll('script');
+                    scripts.forEach(function(s) {
+                        var newScript = document.createElement('script');
+                        if (s.src) {
+                            newScript.src = s.src;
+                        } else {
+                            newScript.textContent = s.textContent;
+                        }
+                        document.body.appendChild(newScript);
+                    });
+                } else {
+                    container.innerHTML = '<p class="text-danger">K 线数据加载失败</p>';
+                }
+            })
+            .catch(function() {
+                container.innerHTML = '<p class="text-danger">K 线数据网络请求失败</p>';
+            });
+    });
+});
+</script>
+{% endblock %}

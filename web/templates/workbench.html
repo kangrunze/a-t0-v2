@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+{% block title %}研究工作台{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>研究工作台</h2>
+    <div class="caption">全局研发进度 · 运行队列 · 发起新回测</div>
+</div>
+
+{# ── 顶部状态条 ── #}
+<div class="status-bar">
+    <span class="item">
+        <i class="bi bi-folder2-open"></i>
+        数据根目录: <span class="num-mono">{{ data_root }}</span>
+    </span>
+    <span class="item">
+        <i class="bi bi-tag"></i>
+        Overlay: <span class="num-mono">research</span>
+    </span>
+</div>
+
+{# ── 研发进度趋势 ── #}
+<div class="card">
+    <div class="card-body">
+        <div class="card-title">研发进度趋势 <span class="text-secondary" style="font-weight:400;text-transform:none;letter-spacing:0;">— median net_pnl + IQR 阴影带</span></div>
+        <div id="trend-chart" class="chart-container" style="height:360px;">
+            <p class="text-secondary text-center py-5">运行次数不足，无法绘制趋势图。</p>
+        </div>
+        <div class="d-flex gap-2 mt-2">
+            <button class="btn btn-outline-secondary btn-sm trend-limit" data-limit="10">10次</button>
+            <button class="btn btn-outline-secondary btn-sm trend-limit active" data-limit="30">30次</button>
+            <button class="btn btn-outline-secondary btn-sm trend-limit" data-limit="50">50次</button>
+            <button class="btn btn-outline-secondary btn-sm trend-limit" data-limit="100">100次</button>
+        </div>
+    </div>
+</div>
+
+{# ── 运行队列 + 发起回测 ── #}
+<div class="row g-3">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-body">
+                <div class="card-title">运行队列</div>
+                <div id="queue-content">
+                    <p class="text-secondary">查询中…</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-body">
+                <div class="card-title">发起新回测</div>
+                <form id="backtest-form">
+                    <div class="mb-2">
+                        <label class="form-label">运行名称</label>
+                        <input type="text" class="form-control" name="name" value="回测_{{ now().strftime('%Y%m%d_%H%M') }}">
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label">股票池</label>
+                        <select class="form-select" name="stock_pool">
+                            <option value="v3_sample_100.txt">v3_sample_100.txt (100只)</option>
+                            <option value="v3_sample_20.txt">v3_sample_20.txt (20只)</option>
+                            <option value="v3_sample_5.txt">v3_sample_5.txt (5只)</option>
+                            <option value="all">全部500只</option>
+                        </select>
+                    </div>
+                    <div class="row g-2 mb-2">
+                        <div class="col">
+                            <label class="form-label">起始日期</label>
+                            <input type="date" class="form-control" name="start_date" value="2023-07-25">
+                        </div>
+                        <div class="col">
+                            <label class="form-label">结束日期</label>
+                            <input type="date" class="form-control" name="end_date" value="2026-07-22">
+                        </div>
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label">底仓股数</label>
+                        <input type="number" class="form-control" name="base_shares" value="3000" step="500">
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label">参数预设</label>
+                        <select class="form-select" name="preset">
+                            <option value="">无（使用 yaml 默认值）</option>
+                        </select>
+                    </div>
+                    <button type="submit" class="btn btn-up w-100">
+                        <i class="bi bi-play-fill"></i> 启动回测
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ── 加载趋势图 ──
+function loadTrend(limit) {
+    var container = document.getElementById('trend-chart');
+    container.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-secondary" role="status"></div></div>';
+    fetch('/api/workbench/trend?limit=' + limit)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.traces && data.traces.length > 0) {
+                var layout = {
+                    height: 320,
+                    margin: {l:60, r:60, t:20, b:40},
+                    hovermode: 'x unified',
+                    legend: {orientation: 'h', y: 1.12},
+                    yaxis: {title: '净盈亏', zeroline: true, zerolinecolor: '#e2e8f0'},
+                    yaxis2: {title: '捕获效率(CE)', overlaying: 'y', side: 'right', zeroline: false},
+                    plot_bgcolor: 'rgba(0,0,0,0)',
+                    paper_bgcolor: 'rgba(0,0,0,0)',
+                    font: {family: 'JetBrains Mono, monospace', size: 11},
+                };
+                Plotly.newPlot('trend-chart', data.traces, layout, {responsive: true});
+            } else {
+                container.innerHTML = '<p class="text-secondary text-center py-5">运行次数不足，无法绘制趋势图。</p>';
+            }
+        })
+        .catch(function() {
+            container.innerHTML = '<p class="text-danger text-center py-5">趋势数据加载失败</p>';
+        });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    loadTrend(30);
+    // 趋势图切换按钮
+    document.querySelectorAll('.trend-limit').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            document.querySelectorAll('.trend-limit').forEach(function(b) { b.classList.remove('active'); });
+            btn.classList.add('active');
+            loadTrend(parseInt(btn.getAttribute('data-limit')));
+        });
+    });
+});
+
+// ── 运行队列轮询 ──
+function refreshQueue() {
+    var container = document.getElementById('queue-content');
+    fetch('/api/workbench/queue')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.active && data.active.length > 0) {
+                var html = '';
+                data.active.forEach(function(run) {
+                    var pct = run.total > 0 ? Math.round(run.done / run.total * 100) : 0;
+                    var statusLabel = run.status === 'running' ? '运行中' : '排队中';
+                    var statusClass = run.status === 'running' ? 'text-warning' : 'text-secondary';
+                    html += '<div class="mb-3">' +
+                        '<div class="d-flex justify-content-between mb-1">' +
+                        '<span><strong>' + (run.name || '#' + run.id) + '</strong></span>' +
+                        '<span class="' + statusClass + '">' + statusLabel + '</span>' +
+                        '</div>' +
+                        '<div class="progress progress-thin mb-1">' +
+                        '<div class="progress-bar bg-success" style="width:' + pct + '%"></div>' +
+                        '</div>' +
+                        '<div class="d-flex justify-content-between">' +
+                        '<span class="num-mono text-secondary" style="font-size:0.75rem;">' + (run.progress || '0/0') + '</span>' +
+                        '<span class="num-mono text-secondary" style="font-size:0.75rem;">' + pct + '%</span>' +
+                        '</div>' +
+                        '</div>';
+                });
+                container.innerHTML = html;
+            } else {
+                container.innerHTML = '<p class="text-secondary">暂无进行中的任务。</p>';
+            }
+        })
+        .catch(function() {
+            container.innerHTML = '<p class="text-danger">加载失败</p>';
+        });
+}
+
+// 每 5 秒刷新队列
+document.addEventListener('DOMContentLoaded', function() {
+    refreshQueue();
+    setInterval(refreshQueue, 5000);
+});
+</script>
+{% endblock %}

@@ -267,6 +267,12 @@ def approve_signal(
     base_shares: int = 3000,
     l1_systemic_risk: bool = False,
     theme_retreated: bool = False,
+    # M15: 预期价差/净收益检查（与实盘 check_risk 对齐）
+    signal_price: float = 0.0,
+    reference_price: float = 0.0,
+    cost_model: Optional[CostModel] = None,
+    risk_params: Optional[RiskParams] = None,
+    is_pairing: bool = False,
 ) -> RiskDecision:
     """
     交易前风控批准（P0-4: 从 _try_execute 拆出）。
@@ -279,6 +285,13 @@ def approve_signal(
       5. require_opposite_direction 约束
       6. 仓位比例限制
       7. T+1 可卖底仓（卖出时）
+      8. 最小预期价差（min_capture_spread，M15 新增，与实盘 check_risk 对齐）
+      9. 最小净期望收益（min_net_expected_return，M15 新增）
+
+    M15 修复（2026-08-04）：合并预期价差/净收益检查，与实盘 check_risk 对齐。
+    此前回测路径的预期价差检查在 _execute_trade 中硬编码，与实盘 check_risk
+    两套实现易漂移。现在 approve_signal 直接接受 price/ref_price/cost_model
+    参数，检查后统一由 RiskDecision 返回。
 
     :return: RiskDecision
     """
@@ -397,6 +410,28 @@ def approve_signal(
             checks.append(f"可用底仓：调整至 {requested_shares} 股（sellable={sellable_shares}）")
         else:
             checks.append(f"可用底仓：{requested_shares} ≤ {sellable_shares} ✓")
+
+    # ── 检查 9: 最小预期价差 + 净收益（M15 新增，与实盘 check_risk 对齐）──
+    # 平仓（is_pairing）跳过：平仓时价格已回归 VWAP 附近，价差检查无意义
+    if not is_pairing and reference_price > 0 and signal_price > 0 and risk_params is not None:
+        cm = cost_model or CostModel.base()
+        expected_spread = abs(signal_price - reference_price) / reference_price
+        if expected_spread < risk_params.min_capture_spread:
+            return RiskDecision(
+                approved=False,
+                reason=f"预期价差 {expected_spread*100:.2f}% < {risk_params.min_capture_spread*100:.1f}%",
+                checks=checks + [f"预期价差：{expected_spread*100:.2f}% ✗"],
+            )
+        checks.append(f"预期价差：{expected_spread*100:.2f}% ≥ {risk_params.min_capture_spread*100:.1f}% ✓")
+
+        net_return = cm.expected_net_return(direction, signal_price, reference_price)
+        if net_return < risk_params.min_net_expected_return:
+            return RiskDecision(
+                approved=False,
+                reason=f"预期净收益 {net_return*100:.2f}% < {risk_params.min_net_expected_return*100:.2f}%",
+                checks=checks + [f"预期净收益：{net_return*100:.2f}% ✗"],
+            )
+        checks.append(f"预期净收益：{net_return*100:.2f}% ≥ {risk_params.min_net_expected_return*100:.2f}% ✓")
 
     if approved:
         reason = "所有风控检查通过"
@@ -532,10 +567,15 @@ class RiskParams:
     整改前的旧值（0.5/0.006/0.001）。来回成本统一收敛到 CostModel，
     RiskParams 不再持有 round_trip_cost 字段（见 check_risk 的 cost_model 参数）。
     当前值为起始参考值，需用真实分钟数据复验。
+
+    M14 修复（2026-08-04）：添加 min_net_expected_return 字段，对应 thresholds.yaml
+    中定义的最小净期望收益门槛。该门槛用于开仓时检查，只有预期净收益（扣除成本）
+    达到此门槛才允许开仓，拦截边际负 EV 交易。
     """
     max_t_size_ratio: float = 0.25        # 单次T仓位比例上限（底仓的 25%）
     max_t_trades_per_day: int = 4         # 每日最大T次数
-    min_capture_spread: float = 0.0072    # 最小预期捕获空间（0.72%，扣除0.27%成本后净0.45%）
+    min_capture_spread: float = 0.0072    # 最小预期捕获空间（0.72%，毛价差）
+    min_net_expected_return: float = 0.0045  # 最小净期望收益（0.45%，扣除成本后）
     eod_check_time: str = "14:50"         # 尾盘平衡检查时间
 
 

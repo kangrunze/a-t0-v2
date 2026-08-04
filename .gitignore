@@ -31,6 +31,11 @@ outputs/*
 # data cache
 data/multi_day_cache/*
 
+# QuantWeb 运行时数据库（SQLite + WAL，不应入库）
+data/quantweb.db
+data/quantweb.db-wal
+data/quantweb.db-shm
+
 # IDE
 .idea/
 .vscode/

@@ -580,56 +580,160 @@ def parse_codes(args, data_dir: Path) -> list[str]:
     raise ValueError("必须指定 --code / --codes / --all / --sample 之一")
 
 
+def _compute_amp_from_baostock(code: str, window_start: str, window_end: str,
+                                 window: int) -> float | None:
+    """
+    用 baostock 计算回测期前 window 个交易日的日均振幅。
+
+    M12 修复（2026-08-04）：本地数据从回测起始日开始，无更早数据，
+    使用 baostock 获取历史数据消除前视偏差。
+
+    振幅口径：(high - low) / prev_close
+    返回日均振幅，失败返回 None。
+    """
+    import baostock as bs
+
+    bs_code = _normalize_to_bs_code(code)
+    if bs_code is None:
+        return None
+
+    lg = bs.login()
+    if lg.error_code != "0":
+        return None
+    try:
+        rs = bs.query_history_k_data_plus(
+            bs_code,
+            "date,high,low,close,preclose",
+            start_date=window_start,
+            end_date=window_end,
+            frequency="d",
+            adjustflag="2",
+        )
+        if rs.error_code != "0":
+            return None
+
+        rows = []
+        while rs.next():
+            rows.append(rs.get_row_data())
+
+        if len(rows) < window // 2:  # 至少需要一半数据
+            return None
+
+        # 取最近 window 个交易日
+        use_rows = rows[-window:]
+        amps = []
+        for row in use_rows:
+            try:
+                high = float(row[1])
+                low = float(row[2])
+                preclose = float(row[4])
+                if preclose > 0:
+                    amps.append((high - low) / preclose)
+            except (ValueError, IndexError):
+                continue
+
+        if not amps:
+            return None
+        return sum(amps) / len(amps)
+    finally:
+        bs.logout()
+
+
+def _normalize_to_bs_code(code: str) -> str | None:
+    """把纯代码归一化为 baostock 格式（sh.600000 / sz.000001）。"""
+    s = code.strip().lower()
+    if s.startswith("sh.") or s.startswith("sz."):
+        return s
+    if len(s) == 6 and s.isdigit():
+        head = s[0]
+        if head == "6":
+            return f"sh.{s}"
+        elif head in ("0", "3"):
+            return f"sz.{s}"
+    return None
+
+
 def filter_codes_by_amplitude(codes: list[str], data_dir: Path, start_date: str,
-                               end_date: str, threshold: float, window: int = 60) -> tuple[list[str], list[tuple[str, float]]]:
+                               end_date: str, threshold: float, window: int = 60,
+                               baostock_fallback: bool = True) -> tuple[list[str], list[tuple[str, float]]]:
     """
     按 60 日日均振幅过滤股票池（模拟 screener.py min_amplitude_long 检查）。
 
     振幅口径：(high - low) / prev_close（与 screener.py L80 一致）
-    窗口：回测期前 window 个交易日（本地数据从 start_date 开始，无更早数据）
+    窗口：start_date 之前的 window 个交易日（回测期前数据，而非回测期内数据）
+
+    M12 修复（2026-08-04）：
+      - 旧行为：start_date=回测起始日，窗口落在回测期内，产生前视偏差
+      - 新行为：start_date=回测起始日，end_date=回测结束日（仅用于确定数据范围），
+        实际窗口使用 start_date 之前的 window 个交易日
+      - 当本地数据不覆盖回测期前时，自动使用 baostock 回退（baostock_fallback=True）
 
     返回 (passed_codes, filtered_codes_with_amp)
     """
+    import json
+    from datetime import datetime, timedelta
+    from pathlib import Path
+
     passed = []
     filtered = []
+
+    # 计算回测期前的窗口：往前推 window*2 天（约 3 个自然月，确保覆盖 60 个交易日）
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    pre_start = (start_dt - timedelta(days=window * 2)).strftime("%Y-%m-%d")
+    pre_end = (start_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # 尝试本地数据 - 回测期前的数据可能在本地文件中存在（文件可能包含比 start_date 更早的数据）
+    has_local_data = False
+    local_amps: dict[str, float] = {}
+    sample_path = data_dir / f"{codes[0]}.json" if codes else None
+    if sample_path and sample_path.exists():
+        with open(sample_path, "r", encoding="utf-8") as f:
+            sample = json.load(f)
+        sample_dates = sorted(sample.get("daily_bars", {}).keys())
+        if sample_dates and sample_dates[0] < start_date:
+            has_local_data = True
+
     for code in codes:
-        path = data_dir / f"{code}.json"
-        if not path.exists():
-            filtered.append((code, -1.0))  # 无数据，按筛掉处理
-            continue
-        with open(path, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        daily_bars = d.get("daily_bars", {})
-        if not daily_bars:
+        amp = None
+
+        if has_local_data:
+            path = data_dir / f"{code}.json"
+            if path.exists():
+                with open(path, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                daily_bars = d.get("daily_bars", {})
+                if daily_bars:
+                    sorted_dates = sorted(daily_bars.keys())
+                    # 取回测期前的数据（start_date 之前的交易日）
+                    in_range_dates = [d for d in sorted_dates if pre_start <= d <= pre_end]
+                    if len(in_range_dates) >= window // 2:
+                        use_dates = in_range_dates[-window:] if len(in_range_dates) >= window else in_range_dates
+                        amps = []
+                        prev_close = None
+                        for date in use_dates:
+                            bars = daily_bars[date]
+                            if not bars:
+                                continue
+                            high = max(b["high"] for b in bars)
+                            low = min(b["low"] for b in bars)
+                            if prev_close and prev_close > 0:
+                                amps.append((high - low) / prev_close)
+                            prev_close = bars[-1]["close"]
+                        if amps:
+                            amp = sum(amps) / len(amps)
+
+        # 本地数据不足，使用 baostock 回退
+        if amp is None and baostock_fallback:
+            amp = _compute_amp_from_baostock(code, pre_start, pre_end, window)
+
+        if amp is None:
             filtered.append((code, -1.0))
             continue
 
-        # 合成日K并取回测期前 window 日
-        sorted_dates = sorted(daily_bars.keys())
-        in_range_dates = [d for d in sorted_dates if start_date <= d <= end_date]
-        use_dates = in_range_dates[:window] if len(in_range_dates) >= window else in_range_dates
-
-        amps = []
-        prev_close = None
-        for date in use_dates:
-            bars = daily_bars[date]
-            if not bars:
-                continue
-            high = max(b["high"] for b in bars)
-            low = min(b["low"] for b in bars)
-            if prev_close and prev_close > 0:
-                amps.append((high - low) / prev_close)
-            prev_close = bars[-1]["close"]
-
-        if not amps:
-            filtered.append((code, -1.0))
-            continue
-
-        avg_amp = sum(amps) / len(amps)
-        if avg_amp >= threshold:
+        if amp >= threshold:
             passed.append(code)
         else:
-            filtered.append((code, avg_amp))
+            filtered.append((code, amp))
 
     return passed, filtered
 

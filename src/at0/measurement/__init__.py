@@ -13,9 +13,14 @@ _is_type 解析字符串注解会失败（模块 __dict__ 时序问题），
 │ 本包的诊断能力已由 archive/diag/diag_*.py 脚本体系替代并经实战验证，│
 │ 公共部分已沉淀为本包下的 loaders.py / rules_parser.py（纯 .py）。 │
 │ 决定放弃解密旧模块，删除全部 .py.bak 占位文件，不再维护。         │
-│ 子模块（time_split/trade_quality/cashflow_audit/ic_analysis/     │
-│ param_landscape/stratified）仍通过 __pycache__/*.pyc 提供运行时   │
-│ 支持，待后续 diag 脚本全部迁移到新模块后再清理 .pyc。            │
+└──────────────────────────────────────────────────────────────────┘
+
+┌─ Sprint 2 修复（2026-08-04）─────────────────────────────────────┐
+│ 六个子模块（time_split/trade_quality/cashflow_audit/ic_analysis/ │
+│ param_landscape/stratified）已根据 .pyc 中的 docstring 和         │
+│ 现有使用模式（backtest.py / run_baseline_measurement.py 等）     │
+│ 重写为可读的 .py 源文件。对应的 .cpython-310.pyc 已删除。       │
+│ 现在 git blame 可以看到每一行是谁改的。                          │
 └──────────────────────────────────────────────────────────────────┘
 """
 import dataclasses as _dc

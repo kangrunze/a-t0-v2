@@ -1,0 +1,933 @@
+{% extends "base.html" %}
+{% block title %}参数与预设{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>参数与预设</h2>
+    <div class="caption">七维度权重 · YAML 编辑 · Optuna 优化 · 预设管理</div>
+</div>
+
+{# ── Tab 导航 ── #}
+<ul class="nav nav-tabs mb-3" id="paramsTabs" role="tablist">
+    <li class="nav-item" role="presentation">
+        <button class="nav-link active" id="tab-weights" data-bs-toggle="tab" data-bs-target="#panel-weights" type="button" role="tab">
+            <i class="bi bi-sliders"></i> 七维度权重
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link" id="tab-yaml" data-bs-toggle="tab" data-bs-target="#panel-yaml" type="button" role="tab">
+            <i class="bi bi-file-code"></i> 原始 YAML
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link" id="tab-optuna" data-bs-toggle="tab" data-bs-target="#panel-optuna" type="button" role="tab">
+            <i class="bi bi-graph-up-arrow"></i> Optuna
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link" id="tab-presets" data-bs-toggle="tab" data-bs-target="#panel-presets" type="button" role="tab">
+            <i class="bi bi-bookmark"></i> 预设管理
+        </button>
+    </li>
+</ul>
+
+<div class="tab-content" id="paramsTabsContent">
+    {# ════════════════════════════════════════════════════════════
+       Tab 1: 七维度权重
+       ════════════════════════════════════════════════════════════ #}
+    <div class="tab-pane fade show active" id="panel-weights" role="tabpanel">
+        <div class="card">
+            <div class="card-body">
+                <div class="card-title">V3 Alpha 七维度权重</div>
+                <p class="text-secondary">权重总和需等于 1.0。调整后可直接发起回测验证。</p>
+                <div id="weights-editor" class="py-3"></div>
+                <div class="alert alert-warning d-none" id="weights-msg"></div>
+                <div class="mt-3">
+                    <button id="btn-save-weights" class="btn btn-up" disabled>
+                        <i class="bi bi-save"></i> 保存权重
+                    </button>
+                    <button id="btn-backtest-weights" class="btn btn-outline-secondary ms-2" disabled>
+                        <i class="bi bi-play"></i> 用此权重发起回测
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {# ════════════════════════════════════════════════════════════
+       Tab 2: YAML 编辑
+       ════════════════════════════════════════════════════════════ #}
+    <div class="tab-pane fade" id="panel-yaml" role="tabpanel">
+        <div class="card">
+            <div class="card-body">
+                <div class="card-title">原始 YAML</div>
+                <p class="text-secondary">直接编辑 thresholds.yaml。保存后可用此配置发起回测。</p>
+                <textarea class="form-control font-monospace" id="yaml-editor" rows="25" style="font-size:0.8rem;tab-size:2;">加载中…</textarea>
+                <div class="mt-2">
+                    <button id="btn-save-yaml" class="btn btn-up" disabled>
+                        <i class="bi bi-save"></i> 保存
+                    </button>
+                    <button id="btn-backtest-yaml" class="btn btn-outline-secondary ms-2" disabled>
+                        <i class="bi bi-play"></i> 用此配置发起回测
+                    </button>
+                    <span id="yaml-status" class="ms-2 text-secondary"></span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {# ════════════════════════════════════════════════════════════
+       Tab 3: Optuna
+       ════════════════════════════════════════════════════════════ #}
+    <div class="tab-pane fade" id="panel-optuna" role="tabpanel">
+        <div class="card">
+            <div class="card-body">
+                <div class="card-title">Optuna 参数优化</div>
+                <p class="text-secondary">发起超参数搜索优化，或查看已有的优化结果。</p>
+
+                {# ── 发起优化表单 ── #}
+                <div class="border rounded p-3 mb-3">
+                    <div class="card-title">发起新优化</div>
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-3">
+                            <label class="form-label">Study 名称</label>
+                            <input type="text" class="form-control" id="optuna-study-name"
+                                   placeholder="留空自动生成">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label">Trial 数</label>
+                            <input type="number" class="form-control" id="optuna-n-trials" value="10" min="3" max="100">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">股票池</label>
+                            <select class="form-select" id="optuna-stock-pool">
+                                <option value="v3_sample_5.txt">v3_sample_5.txt</option>
+                                <option value="v3_sample_20.txt">v3_sample_20.txt</option>
+                                <option value="v3_sample_100.txt">v3_sample_100.txt</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label">起始日期</label>
+                            <input type="date" class="form-control" id="optuna-start-date" value="2023-07-25">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label">结束日期</label>
+                            <input type="date" class="form-control" id="optuna-end-date" value="2026-07-22">
+                        </div>
+                    </div>
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-2">
+                            <label class="form-label">底仓股数</label>
+                            <input type="number" class="form-control" id="optuna-base-shares" value="3000" min="1000" step="500">
+                        </div>
+                    </div>
+                    <div class="mt-2">
+                        <button id="btn-start-optuna" class="btn btn-up">
+                            <i class="bi bi-play"></i> 开始优化
+                        </button>
+                    </div>
+                </div>
+
+                {# ── 进度展示 ── #}
+                <div id="optuna-progress-area" class="d-none mb-3">
+                    <div class="border rounded p-3">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <span class="card-title mb-0">优化进度</span>
+                            <span id="optuna-progress-study" class="text-secondary small"></span>
+                        </div>
+                        <div class="progress" style="height:24px;">
+                            <div id="optuna-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated"
+                                 role="progressbar" style="width:0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+                            </div>
+                        </div>
+                        <div class="d-flex justify-content-between mt-1">
+                            <span id="optuna-progress-text" class="text-secondary small">0/0</span>
+                            <span id="optuna-progress-status" class="text-secondary small">等待中</span>
+                        </div>
+                    </div>
+                </div>
+
+                <hr class="my-3">
+
+                {# ── 已有结果查看 ── #}
+                <div class="card-title">已有优化结果</div>
+
+                {# Study 选择器 #}
+                <div class="row g-2 mb-3 align-items-end">
+                    <div class="col-md-4">
+                        <label class="form-label">选择 Study</label>
+                        <select class="form-select" id="optuna-study-select">
+                            <option value="">— 选择 study —</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <button id="btn-load-optuna" class="btn btn-up" disabled>
+                            <i class="bi bi-search"></i> 加载 Trials
+                        </button>
+                    </div>
+                    <div class="col-md-3">
+                        <button id="btn-apply-optuna" class="btn btn-outline-success" disabled>
+                            <i class="bi bi-check2-square"></i> 应用最优参数
+                        </button>
+                    </div>
+                </div>
+
+                {# Study 概览 #}
+                <div id="optuna-overview" class="row g-2 mb-3"></div>
+
+                {# 收敛曲线 #}
+                <div class="card-title mt-3">收敛曲线</div>
+                <div id="optuna-convergence" class="border rounded" style="height:360px;">
+                    <p class="text-secondary text-center py-5">选择 study 后加载</p>
+                </div>
+
+                {# Trial 列表 #}
+                <div class="card-title mt-3">Trial 记录</div>
+                <div id="optuna-trials-table" class="table-responsive" style="max-height:400px;overflow-y:auto;">
+                    <p class="text-secondary">选择 study 后加载</p>
+                </div>
+
+                {# 参数搜索空间 #}
+                <div class="card-title mt-3">参数搜索空间</div>
+                <div id="optuna-param-space" class="table-responsive">
+                    <p class="text-secondary">加载中…</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {# ════════════════════════════════════════════════════════════
+       Tab 4: 预设管理
+       ════════════════════════════════════════════════════════════ #}
+    <div class="tab-pane fade" id="panel-presets" role="tabpanel">
+        <div class="card">
+            <div class="card-body">
+                <div class="card-title">参数预设</div>
+                <p class="text-secondary">管理已保存的参数配置预设。</p>
+
+                {# 新建预设表单 #}
+                <div class="border rounded p-3 mb-3">
+                    <div class="card-title">新建预设</div>
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-4">
+                            <label class="form-label">预设名称</label>
+                            <input type="text" class="form-control" id="preset-name" placeholder="如: v7.35-optimal">
+                        </div>
+                        <div class="col-md-8">
+                            <label class="form-label">描述（可选）</label>
+                            <input type="text" class="form-control" id="preset-desc" placeholder="如: 36股×3年网格最优参数">
+                        </div>
+                    </div>
+                    <button id="btn-save-preset" class="btn btn-up">
+                        <i class="bi bi-plus-lg"></i> 创建预设
+                    </button>
+                </div>
+
+                {# 预设列表 #}
+                <div id="presets-list">
+                    <p class="text-secondary">加载中…</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ═══════════════════════════════════════════════════════════════
+// 七维度权重
+// ═══════════════════════════════════════════════════════════════
+var currentWeights = {};
+var weightChanged = false;
+
+function loadWeights() {
+    fetch('/api/params/weights')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            currentWeights = data.weights || {};
+            renderWeightEditors(data.dimensions || Object.keys(currentWeights));
+            document.getElementById('btn-save-weights').disabled = true;
+            document.getElementById('btn-backtest-weights').disabled = false;
+        })
+        .catch(function() {
+            document.getElementById('weights-editor').innerHTML = '<p class="text-danger">加载权重失败</p>';
+        });
+}
+
+function renderWeightEditors(dimensions) {
+    var container = document.getElementById('weights-editor');
+    var html = '<div class="row g-3">';
+    dimensions.forEach(function(dim) {
+        var val = currentWeights[dim] || 0;
+        var pct = (val * 100).toFixed(1);
+        var dimLabels = {
+            'trend': '趋势 Trend', 'wave': '波浪 Wave', 'support': '支撑 Support',
+            'momentum': '动量 Momentum', 'liquidity': '流动性 Liquidity',
+            'expected_move': '预期波幅 ExpectedMove', 'risk': '风险 Risk'
+        };
+        var label = dimLabels[dim] || dim;
+        html += '<div class="col-md-6 col-lg-4">' +
+            '<div class="border rounded p-3">' +
+            '<label class="form-label small">' + label + '</label>' +
+            '<div class="d-flex align-items-center gap-2">' +
+            '<input type="range" class="form-range flex-grow-1 weight-slider" data-dim="' + dim + '" ' +
+            'min="0" max="100" step="1" value="' + pct + '">' +
+            '<input type="number" class="form-control weight-input num-mono" data-dim="' + dim + '" ' +
+            'style="width:80px;" min="0" max="1" step="0.01" value="' + val.toFixed(2) + '">' +
+            '</div></div></div>';
+    });
+    html += '</div>';
+
+    // 权重总和
+    var total = 0;
+    dimensions.forEach(function(d) { total += currentWeights[d] || 0; });
+    total = Math.round(total * 10000) / 10000;
+    html += '<div class="mt-3 d-flex align-items-center gap-3">' +
+        '<span class="text-secondary">权重总和:</span>' +
+        '<span id="weight-total" class="num-mono" style="font-size:1.1rem;">' + total.toFixed(4) + '</span>' +
+        '<span id="weight-valid" class="badge bg-success">✓ 有效</span>' +
+        '</div>';
+
+    container.innerHTML = html;
+
+    // 绑定事件
+    container.querySelectorAll('.weight-slider').forEach(function(slider) {
+        slider.addEventListener('input', function() {
+            var dim = this.getAttribute('data-dim');
+            var val = parseInt(this.value) / 100;
+            currentWeights[dim] = val;
+            container.querySelector('.weight-input[data-dim="' + dim + '"]').value = val.toFixed(2);
+            updateWeightTotal();
+        });
+    });
+    container.querySelectorAll('.weight-input').forEach(function(input) {
+        input.addEventListener('change', function() {
+            var dim = this.getAttribute('data-dim');
+            var val = parseFloat(this.value) || 0;
+            currentWeights[dim] = Math.max(0, Math.min(1, val));
+            container.querySelector('.weight-slider[data-dim="' + dim + '"]').value = (currentWeights[dim] * 100).toFixed(0);
+            updateWeightTotal();
+        });
+    });
+}
+
+function updateWeightTotal() {
+    var total = 0;
+    Object.keys(currentWeights).forEach(function(k) { total += currentWeights[k]; });
+    total = Math.round(total * 10000) / 10000;
+    document.getElementById('weight-total').textContent = total.toFixed(4);
+    var validEl = document.getElementById('weight-valid');
+    if (Math.abs(total - 1.0) < 0.01) {
+        validEl.textContent = '✓ 有效';
+        validEl.className = 'badge bg-success';
+        weightChanged = true;
+        document.getElementById('btn-save-weights').disabled = false;
+    } else {
+        validEl.textContent = '✗ 总和需为 1.0';
+        validEl.className = 'badge bg-danger';
+        document.getElementById('btn-save-weights').disabled = true;
+    }
+}
+
+document.getElementById('btn-save-weights').addEventListener('click', function() {
+    var btn = this;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 保存中…';
+    document.getElementById('weights-msg').classList.add('d-none');
+
+    fetch('/api/params/weights', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({weights: currentWeights}),
+    })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.error) {
+                document.getElementById('weights-msg').textContent = '保存失败: ' + data.error;
+                document.getElementById('weights-msg').className = 'alert alert-danger';
+            } else {
+                document.getElementById('weights-msg').textContent = '✓ 权重已保存到 thresholds.yaml';
+                document.getElementById('weights-msg').className = 'alert alert-success';
+                weightChanged = false;
+            }
+            document.getElementById('weights-msg').classList.remove('d-none');
+            btn.innerHTML = '<i class="bi bi-save"></i> 保存权重';
+            btn.disabled = true;
+        })
+        .catch(function() {
+            document.getElementById('weights-msg').textContent = '保存失败: 网络错误';
+            document.getElementById('weights-msg').className = 'alert alert-danger';
+            document.getElementById('weights-msg').classList.remove('d-none');
+            btn.innerHTML = '<i class="bi bi-save"></i> 保存权重';
+            btn.disabled = false;
+        });
+});
+
+document.getElementById('btn-backtest-weights').addEventListener('click', function() {
+    var name = prompt('回测名称:', '权重测试 ' + new Date().toISOString().slice(0, 10));
+    if (!name) return;
+    var btn = this;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 发起中…';
+    fetch('/api/params/backtest', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: name, tag: 'weights_test'}),
+    })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.run_id) {
+                window.location.href = '/runs/' + data.run_id;
+            } else {
+                alert('发起回测失败: ' + (data.error || '未知错误'));
+                btn.disabled = false;
+                btn.innerHTML = '<i class="bi bi-play"></i> 用此权重发起回测';
+            }
+        })
+        .catch(function() {
+            alert('网络错误');
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-play"></i> 用此权重发起回测';
+        });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// YAML 编辑
+// ═══════════════════════════════════════════════════════════════
+var yamlChanged = false;
+var yamlEditor = document.getElementById('yaml-editor');
+
+function loadYaml() {
+    fetch('/api/params/yaml')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.content !== undefined) {
+                yamlEditor.value = data.content;
+                document.getElementById('btn-save-yaml').disabled = true;
+                document.getElementById('btn-backtest-yaml').disabled = false;
+                document.getElementById('yaml-status').textContent = data.path || '';
+            } else {
+                yamlEditor.value = ';; 加载失败: ' + (data.error || '');
+            }
+        })
+        .catch(function() {
+            yamlEditor.value = ';; 加载失败: 网络错误';
+        });
+}
+
+yamlEditor.addEventListener('input', function() {
+    yamlChanged = true;
+    document.getElementById('btn-save-yaml').disabled = false;
+});
+
+document.getElementById('btn-save-yaml').addEventListener('click', function() {
+    var btn = this;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 保存中…';
+    document.getElementById('yaml-status').textContent = '';
+
+    fetch('/api/params/yaml', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({content: yamlEditor.value}),
+    })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.error) {
+                document.getElementById('yaml-status').textContent = '✗ ' + data.error;
+                document.getElementById('yaml-status').className = 'text-danger';
+                btn.disabled = false;
+            } else {
+                document.getElementById('yaml-status').textContent = '✓ 已保存到 ' + data.path;
+                document.getElementById('yaml-status').className = 'text-success';
+                yamlChanged = false;
+            }
+            btn.innerHTML = '<i class="bi bi-save"></i> 保存';
+        })
+        .catch(function() {
+            document.getElementById('yaml-status').textContent = '✗ 网络错误';
+            document.getElementById('yaml-status').className = 'text-danger';
+            btn.innerHTML = '<i class="bi bi-save"></i> 保存';
+            btn.disabled = false;
+        });
+});
+
+document.getElementById('btn-backtest-yaml').addEventListener('click', function() {
+    if (yamlChanged) {
+        if (!confirm('YAML 有未保存的修改，是否先保存再发起回测？')) return;
+        document.getElementById('btn-save-yaml').click();
+    }
+    var name = prompt('回测名称:', 'YAML 测试 ' + new Date().toISOString().slice(0, 10));
+    if (!name) return;
+    var btn = this;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 发起中…';
+    fetch('/api/params/backtest', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: name, tag: 'yaml_test'}),
+    })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.run_id) {
+                window.location.href = '/runs/' + data.run_id;
+            } else {
+                alert('发起回测失败: ' + (data.error || '未知错误'));
+                btn.disabled = false;
+                btn.innerHTML = '<i class="bi bi-play"></i> 用此配置发起回测';
+            }
+        })
+        .catch(function() {
+            alert('网络错误');
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-play"></i> 用此配置发起回测';
+        });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// 预设管理
+// ═══════════════════════════════════════════════════════════════
+function loadPresets() {
+    fetch('/api/params/presets')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            renderPresets(data.presets || []);
+        })
+        .catch(function() {
+            document.getElementById('presets-list').innerHTML = '<p class="text-danger">加载预设失败</p>';
+        });
+}
+
+function renderPresets(presets) {
+    var container = document.getElementById('presets-list');
+    if (presets.length === 0) {
+        container.innerHTML = '<p class="text-secondary">暂无预设。</p>';
+        return;
+    }
+    var html = '<div class="card-title">已保存的预设</div>';
+    presets.forEach(function(p) {
+        var paramsStr = typeof p.params_override === 'object' ?
+            JSON.stringify(p.params_override, null, 2) : (p.params_override || '{}');
+        html += '<div class="border rounded p-3 mb-2">' +
+            '<div class="d-flex justify-content-between align-items-start">' +
+            '<div>' +
+            '<strong>' + p.name + '</strong>' +
+            (p.description ? '<span class="text-secondary ms-2">' + p.description + '</span>' : '') +
+            '<div class="small text-secondary mt-1">' +
+            '创建时间: ' + (p.created_at || '—') +
+            '</div>' +
+            '<pre class="small text-secondary mt-1 mb-0" style="max-height:120px;overflow-y:auto;">' + paramsStr + '</pre>' +
+            '</div>' +
+            '<button class="btn btn-sm btn-outline-danger delete-preset" data-id="' + p.id + '">' +
+            '<i class="bi bi-trash"></i>' +
+            '</button>' +
+            '</div></div>';
+    });
+    container.innerHTML = html;
+
+    // 绑定删除事件
+    container.querySelectorAll('.delete-preset').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var id = parseInt(this.getAttribute('data-id'));
+            if (!confirm('确定删除此预设？')) return;
+            fetch('/api/params/presets/' + id, {method: 'DELETE'})
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.ok) loadPresets();
+                    else alert('删除失败: ' + (data.error || ''));
+                })
+                .catch(function() { alert('删除失败: 网络错误'); });
+        });
+    });
+}
+
+document.getElementById('btn-save-preset').addEventListener('click', function() {
+    var name = document.getElementById('preset-name').value.trim();
+    if (!name) { alert('请输入预设名称'); return; }
+    var desc = document.getElementById('preset-desc').value.trim();
+
+    // 创建预设（保存当前 YAML 内容作为快照）
+    fetch('/api/params/yaml')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            return fetch('/api/params/presets', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    name: name,
+                    description: desc,
+                    params_override: {yaml_snapshot: data.content || ''},
+                }),
+            });
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.ok) {
+                document.getElementById('preset-name').value = '';
+                document.getElementById('preset-desc').value = '';
+                loadPresets();
+            } else {
+                alert('保存失败: ' + (data.error || ''));
+            }
+        })
+        .catch(function() { alert('保存失败: 网络错误'); });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Optuna
+// ═══════════════════════════════════════════════════════════════
+var paramSpace = {};
+
+function loadOptunaInfo() {
+    fetch('/api/params/optuna/info')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            paramSpace = data.param_space || {};
+            renderParamSpace(data.param_space || {}, data.objective_weights || {});
+        });
+}
+
+function loadOptunaStudies() {
+    fetch('/api/params/optuna/studies')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var sel = document.getElementById('optuna-study-select');
+            var studies = data.studies || [];
+            if (studies.length === 0) {
+                sel.innerHTML = '<option value="">— 暂无 study —</option>';
+                document.getElementById('btn-load-optuna').disabled = true;
+                return;
+            }
+            var html = '<option value="">— 选择 study —</option>';
+            studies.forEach(function(s) {
+                html += '<option value="' + s.study_name + '">' + s.study_name +
+                    ' (' + s.trial_count + ' trials, best=' + (s.best_objective || 0).toFixed(2) + ')</option>';
+            });
+            sel.innerHTML = html;
+            document.getElementById('btn-load-optuna').disabled = false;
+            updateApplyButton();
+        });
+}
+
+function renderParamSpace(space, weights) {
+    var container = document.getElementById('optuna-param-space');
+    var html = '<table class="table table-hover"><thead><tr>' +
+        '<th>参数</th><th>类型</th><th>范围</th><th>当前值</th></tr></thead><tbody>';
+    var dimLabels = {
+        'net_profit': '净盈亏', 'profit_factor': 'Profit Factor',
+        'capture_efficiency': 'Capture Efficiency', 'sharpe': 'Sharpe Ratio',
+        'max_drawdown': 'Max Drawdown', 'turnover_penalty': '换手率惩罚'
+    };
+    Object.keys(space).forEach(function(k) {
+        var p = space[k];
+        var range = p.type === 'int' ? p.low + ' ~ ' + p.high :
+            (p.low + ' ~ ' + p.high + ' (step=' + p.step + ')');
+        html += '<tr><td class="num-mono">' + (p.label || k) + '</td>' +
+            '<td>' + p.type + '</td><td class="num-mono">' + range + '</td>' +
+            '<td class="num-mono">' + p.current + '</td></tr>';
+    });
+    // 目标函数权重
+    html += '</tbody></table>';
+    html += '<div class="card-title mt-2">目标函数权重</div>';
+    html += '<div class="d-flex flex-wrap gap-2">';
+    Object.keys(weights).forEach(function(k) {
+        var w = (weights[k] * 100).toFixed(0) + '%';
+        html += '<span class="border rounded px-2 py-1 small">' + (dimLabels[k] || k) + ': ' + w + '</span>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+}
+
+function loadOptunaTrials() {
+    var study = document.getElementById('optuna-study-select').value;
+    if (!study) return;
+    var btn = document.getElementById('btn-load-optuna');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 加载中…';
+
+    fetch('/api/params/optuna/trials?study=' + encodeURIComponent(study))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            renderOptunaTrials(data.trials || []);
+            renderOptunaConvergence(data.trials || []);
+            renderOptunaOverview(data.trials || []);
+            btn.innerHTML = '<i class="bi bi-search"></i> 加载 Trials';
+            btn.disabled = false;
+        })
+        .catch(function() {
+            document.getElementById('optuna-trials-table').innerHTML = '<p class="text-danger">加载失败</p>';
+            btn.innerHTML = '<i class="bi bi-search"></i> 加载 Trials';
+            btn.disabled = false;
+        });
+}
+
+function renderOptunaOverview(trials) {
+    var container = document.getElementById('optuna-overview');
+    if (trials.length === 0) {
+        container.innerHTML = '<p class="text-secondary">暂无 trial 记录。</p>';
+        return;
+    }
+    var objectives = trials.map(function(t) { return t.objective || 0; });
+    var best = Math.max.apply(null, objectives);
+    var worst = Math.min.apply(null, objectives);
+    var avg = objectives.reduce(function(a, b) { return a + b; }, 0) / objectives.length;
+    var bestTrial = trials.reduce(function(a, b) { return (a.objective || 0) > (b.objective || 0) ? a : b; });
+    var bestParams = bestTrial.params || {};
+    var paramsHtml = Object.keys(bestParams).slice(0, 5).map(function(k) {
+        return '<span class="border rounded px-1 small me-1">' + k + '=' + bestParams[k] + '</span>';
+    }).join('');
+
+    container.innerHTML =
+        '<div class="col-md-3"><div class="metric-card"><div class="label">Trials</div><div class="value">' + trials.length + '</div></div></div>' +
+        '<div class="col-md-3"><div class="metric-card"><div class="label">Best Objective</div><div class="value text-up">' + best.toFixed(2) + '</div></div></div>' +
+        '<div class="col-md-3"><div class="metric-card"><div class="label">Avg Objective</div><div class="value">' + avg.toFixed(2) + '</div></div></div>' +
+        '<div class="col-md-3"><div class="metric-card"><div class="label">Worst Objective</div><div class="value text-down">' + worst.toFixed(2) + '</div></div></div>' +
+        '<div class="col-12 mt-2"><div class="metric-card"><div class="label">最优参数</div><div class="value" style="font-size:0.85rem;">' + paramsHtml + '</div></div></div>';
+}
+
+function renderOptunaConvergence(trials) {
+    var container = document.getElementById('optuna-convergence');
+    if (trials.length < 3) {
+        container.innerHTML = '<p class="text-secondary text-center py-5">至少需要 3 个 trial 才能绘制收敛曲线</p>';
+        return;
+    }
+    var numbers = trials.map(function(t) { return t.trial_number; });
+    var objectives = trials.map(function(t) { return t.objective || 0; });
+    // 累计最优
+    var bestSoFar = [];
+    var best = -Infinity;
+    objectives.forEach(function(v) {
+        if (v > best) best = v;
+        bestSoFar.push(best);
+    });
+
+    var trace1 = {
+        x: numbers, y: objectives, mode: 'markers', type: 'scatter',
+        name: 'Trial', marker: {color: '#6c757d', size: 6},
+    };
+    var trace2 = {
+        x: numbers, y: bestSoFar, mode: 'lines', type: 'scatter',
+        name: '累计最优', line: {color: '#10b981', width: 2},
+    };
+    var layout = {
+        margin: {l: 50, r: 20, t: 20, b: 40},
+        paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+        xaxis: {title: 'Trial #', gridcolor: '#e5e7eb'},
+        yaxis: {title: 'Objective', gridcolor: '#e5e7eb'},
+        legend: {orientation: 'h', y: 1.1},
+        hovermode: 'x unified',
+    };
+    Plotly.newPlot(container, [trace1, trace2], layout, {responsive: true, displayModeBar: false});
+}
+
+function renderOptunaTrials(trials) {
+    var container = document.getElementById('optuna-trials-table');
+    if (trials.length === 0) {
+        container.innerHTML = '<p class="text-secondary">暂无 trial 记录。</p>';
+        return;
+    }
+    var best = trials.reduce(function(a, b) { return (a.objective || 0) > (b.objective || 0) ? a : b; });
+    var bestNum = best.trial_number;
+
+    var html = '<table class="table table-hover"><thead><tr>' +
+        '<th>#</th><th>Objective</th><th>Net PnL</th><th>PF</th><th>Win Rate</th><th>参数</th></tr></thead><tbody>';
+    trials.forEach(function(t) {
+        var isBest = t.trial_number === bestNum;
+        var rowClass = isBest ? 'table-success' : '';
+        var paramsStr = '';
+        if (t.params) {
+            paramsStr = Object.keys(t.params).slice(0, 4).map(function(k) {
+                return k + '=' + t.params[k];
+            }).join(', ');
+        }
+        html += '<tr class="' + rowClass + '">' +
+            '<td class="num-mono">' + t.trial_number + (isBest ? ' ★' : '') + '</td>' +
+            '<td class="num-mono">' + (t.objective || 0).toFixed(4) + '</td>' +
+            '<td class="num-mono">' + fmt(t.net_pnl || 0) + '</td>' +
+            '<td class="num-mono">' + (t.profit_factor || 0).toFixed(2) + '</td>' +
+            '<td class="num-mono">' + ((t.win_rate || 0) * 100).toFixed(1) + '%</td>' +
+            '<td class="small text-secondary">' + paramsStr + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    container.innerHTML = html;
+}
+
+document.getElementById('btn-load-optuna').addEventListener('click', function() {
+    loadOptunaTrials();
+});
+
+document.getElementById('optuna-study-select').addEventListener('change', function() {
+    updateApplyButton();
+});
+
+// 切换 Tab 到 Optuna 时自动加载 studies
+document.getElementById('tab-optuna').addEventListener('shown.bs.tab', function() {
+    loadOptunaStudies();
+});
+
+// ═══════════════════════════════════════════════════════════════
+// 发起优化
+// ═══════════════════════════════════════════════════════════════
+var optunaRunId = null;
+var optunaEventSource = null;
+
+document.getElementById('btn-start-optuna').addEventListener('click', function() {
+    var btn = this;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 发起中…';
+
+    var studyName = document.getElementById('optuna-study-name').value.trim();
+    var nTrials = parseInt(document.getElementById('optuna-n-trials').value) || 10;
+    var stockPool = document.getElementById('optuna-stock-pool').value;
+    var startDate = document.getElementById('optuna-start-date').value;
+    var endDate = document.getElementById('optuna-end-date').value;
+    var baseShares = parseInt(document.getElementById('optuna-base-shares').value) || 3000;
+
+    fetch('/api/params/optuna/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            study_name: studyName,
+            n_trials: nTrials,
+            stock_pool: stockPool,
+            start_date: startDate,
+            end_date: endDate,
+            base_shares: baseShares,
+        }),
+    })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            btn.innerHTML = '<i class="bi bi-play"></i> 开始优化';
+            btn.disabled = false;
+            if (data.ok) {
+                // 关闭之前的 SSE
+                if (optunaEventSource) {
+                    optunaEventSource.close();
+                }
+                optunaRunId = data.run_id;
+                // 显示进度区域，启动 SSE
+                startOptunaProgress(data.run_id, data.study_name, data.n_trials);
+                // 刷新 study 列表
+                setTimeout(loadOptunaStudies, 1000);
+            } else {
+                alert('发起优化失败: ' + (data.error || ''));
+            }
+        })
+        .catch(function() {
+            btn.innerHTML = '<i class="bi bi-play"></i> 开始优化';
+            btn.disabled = false;
+            alert('网络错误');
+        });
+});
+
+function startOptunaProgress(runId, studyName, nTrials) {
+    var area = document.getElementById('optuna-progress-area');
+    area.classList.remove('d-none');
+    document.getElementById('optuna-progress-study').textContent = studyName || '—';
+    document.getElementById('optuna-progress-bar').style.width = '0%';
+    document.getElementById('optuna-progress-bar').textContent = '0%';
+    document.getElementById('optuna-progress-text').textContent = '0/' + nTrials;
+    document.getElementById('optuna-progress-status').textContent = '运行中';
+
+    optunaEventSource = new EventSource('/api/runs/' + runId + '/stream');
+    optunaEventSource.addEventListener('progress', function(e) {
+        var data = JSON.parse(e.data);
+        var bar = document.getElementById('optuna-progress-bar');
+        var text = document.getElementById('optuna-progress-text');
+        var status = document.getElementById('optuna-progress-status');
+        var pct = data.total > 0 ? (data.done / data.total) * 100 : 0;
+        bar.style.width = pct + '%';
+        bar.textContent = Math.round(pct) + '%';
+        bar.setAttribute('aria-valuenow', pct);
+        text.textContent = data.done + '/' + data.total;
+        if (data.status === 'running') {
+            status.textContent = '运行中 (' + data.done + '/' + data.total + ')';
+        } else if (data.status === 'completed') {
+            status.textContent = '✅ 已完成';
+            bar.classList.remove('progress-bar-animated');
+            // 自动重新加载 study 列表和 trials
+            loadOptunaStudies();
+            // 如果选中了当前 study，自动加载 trials
+            var sel = document.getElementById('optuna-study-select');
+            for (var i = 0; i < sel.options.length; i++) {
+                if (sel.options[i].value === studyName) {
+                    sel.value = studyName;
+                    document.getElementById('btn-load-optuna').disabled = false;
+                    loadOptunaTrials();
+                    break;
+                }
+            }
+            optunaEventSource.close();
+            optunaEventSource = null;
+        } else if (data.status === 'failed' || data.status === 'cancelled') {
+            status.textContent = '❌ ' + data.status;
+            bar.classList.remove('progress-bar-animated');
+            bar.classList.add('bg-danger');
+            optunaEventSource.close();
+            optunaEventSource = null;
+        }
+    });
+    optunaEventSource.addEventListener('error', function() {
+        // 连接断开时停止轮询
+        if (optunaEventSource) {
+            optunaEventSource.close();
+            optunaEventSource = null;
+        }
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 一键应用最优参数
+// ═══════════════════════════════════════════════════════════════
+document.getElementById('btn-apply-optuna').addEventListener('click', function() {
+    var study = document.getElementById('optuna-study-select').value;
+    if (!study) return;
+    if (!confirm('确定将 study "' + study + '" 的最优参数应用到 thresholds.yaml？')) return;
+
+    var btn = this;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 应用中…';
+
+    fetch('/api/params/optuna/apply', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({study_name: study}),
+    })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.ok) {
+                alert('✅ 最优参数已应用到 ' + data.path + '\nObjective: ' + data.objective.toFixed(4));
+                // 刷新 YAML 编辑器
+                loadYaml();
+            } else {
+                alert('应用失败: ' + (data.error || ''));
+            }
+            btn.innerHTML = '<i class="bi bi-check2-square"></i> 应用最优参数';
+            btn.disabled = false;
+        })
+        .catch(function() {
+            alert('网络错误');
+            btn.innerHTML = '<i class="bi bi-check2-square"></i> 应用最优参数';
+            btn.disabled = false;
+        });
+});
+
+// 加载 trials 后启用/禁用应用按钮
+function updateApplyButton() {
+    var study = document.getElementById('optuna-study-select').value;
+    var btn = document.getElementById('btn-apply-optuna');
+    btn.disabled = !study;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 初始化
+// ═══════════════════════════════════════════════════════════════
+document.addEventListener('DOMContentLoaded', function() {
+    loadWeights();
+    loadYaml();
+    loadPresets();
+    loadOptunaInfo();  // 加载参数空间（静态信息）
+});
+</script>
+{% endblock %}

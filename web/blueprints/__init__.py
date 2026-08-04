@@ -1,0 +1,1 @@
+"""QuantWeb 页面 Blueprint 注册。"""

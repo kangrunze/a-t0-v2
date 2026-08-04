@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}运行列表{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>运行列表</h2>
+    <div class="caption">选择一次回测运行查看详情</div>
+</div>
+
+{% if runs %}
+<div class="card">
+    <div class="card-body p-0">
+        <table class="table table-hover mb-0">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>名称</th>
+                    <th>时间</th>
+                    <th>状态</th>
+                    <th>股票池</th>
+                    <th>范围</th>
+                    <th>耗时</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in runs %}
+                <tr>
+                    <td class="num-mono">{{ r.id }}</td>
+                    <td>{{ r.name or '—' }}</td>
+                    <td class="num-mono">{{ r.created_at[:19] }}</td>
+                    <td>
+                        {% if r.status == 'completed' %}
+                        <span class="text-up"><i class="bi bi-check-circle-fill"></i> 完成</span>
+                        {% elif r.status == 'running' %}
+                        <span class="text-warning"><i class="bi bi-arrow-repeat"></i> 运行中</span>
+                        {% elif r.status == 'failed' %}
+                        <span class="text-down"><i class="bi bi-exclamation-circle-fill"></i> 失败</span>
+                        {% elif r.status == 'cancelled' %}
+                        <span class="text-secondary"><i class="bi bi-slash-circle"></i> 已取消</span>
+                        {% else %}
+                        <span class="text-secondary">{{ r.status }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="num-mono">{{ r.stock_pool or '—' }}</td>
+                    <td class="num-mono">{{ (r.start_date or '?')[:10] }} ~ {{ (r.end_date or '?')[:10] }}</td>
+                    <td class="num-mono">{{ '%.1fs'|format(r.duration_s) if r.duration_s else '—' }}</td>
+                    <td>
+                        <a href="{{ url_for('run.detail', run_id=r.id) }}" class="btn btn-outline-secondary btn-sm">
+                            <i class="bi bi-eye"></i> 查看
+                        </a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% else %}
+<div class="card">
+    <div class="card-body text-center py-5">
+        <i class="bi bi-inbox" style="font-size:2rem;color:var(--color-text-secondary);"></i>
+        <p class="text-secondary mt-2">还没有回测运行记录。前往「研究工作台」发起第一次回测。</p>
+        <a href="{{ url_for('workbench.index') }}" class="btn btn-up mt-2">
+            <i class="bi bi-play-fill"></i> 发起回测
+        </a>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

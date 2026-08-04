@@ -24,6 +24,7 @@ OUT_DIR = Path(r"d:\project\a-t0-v2\outputs\amplitude_pool")
 BACKTEST_START = "2023-07-25"  # 回测开始日
 BACKTEST_END = "2026-07-22"    # 回测结束日
 WINDOW = 60                    # 60 个交易日
+AMP_WINDOW_START = "2023-05-04"  # 回测前约 60 个交易日（2023-07-25 往前推）
 THRESHOLD = 0.0494             # Stage D Youden 最优切点
 
 
@@ -56,11 +57,7 @@ def synth_daily_klines(daily_bars: dict):
 def compute_60d_amplitude(daily_klines, start_date, end_date, window=60):
     """
     计算回测期前 window 个交易日的日均振幅。
-    本地数据从 start_date 开始，没有更早数据，所以用回测期前 60 日
-    （start_date 之后的 60 个交易日）。这有轻微前视偏差，但本地数据限制下
-    唯一可行，且与 diag_stop_ratio_vs_amplitude.py 口径一致（全回测期均值）。
-
-    振幅口径：(high - low) / prev_close（与 screener.py L80 一致）
+    保留用于兼容性，但 M12 修复后 main 不再使用该函数。
     """
     in_range = [k for k in daily_klines if start_date <= k["date"] <= end_date]
     if len(in_range) < window:
@@ -76,13 +73,80 @@ def compute_60d_amplitude(daily_klines, start_date, end_date, window=60):
     return sum(amps) / len(amps), len(amps), len(use)
 
 
+def compute_amp_from_baostock(code: str) -> float | None:
+    """
+    用 baostock 获取回测期前 60 个交易日的日均振幅。
+
+    M12 修复（2026-08-04）：本地数据从回测起始日开始，无更早数据，
+    使用 baostock 获取历史数据消除前视偏差。
+
+    振幅口径：(high - low) / prev_close（与 screener.py L80 一致）
+    返回日均振幅，失败返回 None。
+    """
+    import baostock as bs
+
+    # 归一化代码格式
+    s = code.strip().lower()
+    if len(s) == 6 and s.isdigit():
+        head = s[0]
+        if head == "6":
+            bs_code = f"sh.{s}"
+        elif head in ("0", "3"):
+            bs_code = f"sz.{s}"
+        else:
+            return None
+    else:
+        return None
+
+    lg = bs.login()
+    if lg.error_code != "0":
+        return None
+    try:
+        rs = bs.query_history_k_data_plus(
+            bs_code,
+            "date,high,low,close,preclose",
+            start_date=AMP_WINDOW_START,
+            end_date=BACKTEST_START,
+            frequency="d",
+            adjustflag="2",
+        )
+        if rs.error_code != "0":
+            return None
+
+        rows = []
+        while rs.next():
+            rows.append(rs.get_row_data())
+
+        if len(rows) < WINDOW // 2:
+            return None
+
+        use_rows = rows[-WINDOW:]
+        amps = []
+        for row in use_rows:
+            try:
+                high = float(row[1])
+                low = float(row[2])
+                preclose = float(row[4])
+                if preclose > 0:
+                    amps.append((high - low) / preclose)
+            except (ValueError, IndexError):
+                continue
+
+        if not amps:
+            return None
+        return sum(amps) / len(amps)
+    finally:
+        bs.logout()
+
+
 def main():
     print("=" * 70)
     print(f"按 60 日振幅筛选股票池")
     print(f"回测开始日: {BACKTEST_START}")
-    print(f"振幅窗口: 回测期前 {WINDOW} 个交易日（2023-07-25起）")
+    print(f"振幅窗口: 回测期前 {WINDOW} 个交易日（{AMP_WINDOW_START} ~ {BACKTEST_START}）")
     print(f"振幅阈值: {THRESHOLD*100:.2f}%（Stage D Youden 最优切点）")
     print(f"振幅口径: (high - low) / prev_close（与 screener.py 一致）")
+    print(f"数据源: baostock（M12 修复：消除前视偏差）")
     print("=" * 70)
 
     # 读取 100 股 seed=42 的股票列表（从已有的 baseline report 提取）
@@ -96,32 +160,21 @@ def main():
     no_data = []
 
     for i, code in enumerate(codes):
-        path = DATA_DIR / f"{code}.json"
-        if not path.exists():
-            no_data.append(code)
-            continue
-        with open(path, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        daily_bars = d.get("daily_bars", {})
-        if not daily_bars:
-            no_data.append(code)
-            continue
-
-        klines = synth_daily_klines(daily_bars)
-        amp, n_used, n_total = compute_60d_amplitude(klines, BACKTEST_START, BACKTEST_END, WINDOW)
+        # M12 修复：使用 baostock 获取回测期前数据，消除前视偏差
+        amp = compute_amp_from_baostock(code)
 
         if amp is None:
             no_data.append(code)
             continue
 
-        rec = {"code": code, "amp": amp, "n_used": n_used}
+        rec = {"code": code, "amp": amp, "n_used": WINDOW}
         if amp >= THRESHOLD:
             passed.append(rec)
         else:
             filtered.append(rec)
 
         if (i + 1) % 20 == 0:
-            print(f"  已处理 {i+1}/{len(codes)}")
+            print(f"  已处理 {i+1}/{len(codes)} 通过={len(passed)} 筛掉={len(filtered)}")
 
     print(f"\n结果:")
     print(f"  通过筛选 (amp >= {THRESHOLD*100:.2f}%): {len(passed)} 只")
