@@ -13,29 +13,40 @@ a-t0-v2/
 │   ├── thresholds.yaml          # 集中配置（信号/风控/成本/筛选/回测/测量）
 │   ├── thresholds.yaml.bak      # 上一版本备份
 │   └── overlays/
-│       ├── paper.yaml           # 模拟盘 overlay（悲观成本 + 15% 仓位 + 尾盘强平）
-│       └── research.yaml        # 研究阶段 overlay（base 成本 + 25% 仓位）
+│       ├── paper.yaml           # 模拟盘 overlay（悲观成本 + 仓位护栏 + 尾盘强平）
+│       └── research.yaml        # 研究阶段 overlay（base 成本 + 仓位）
 ├── docs/
 │   ├── TECHNICAL_GUIDE.md       # 技术指南（运行手册 + 模块架构）
+│   ├── QUANTWEB_PLAN.md         # Web 平台规划与路线图
 │   └── thin4_zombie_params_audit.md  # 僵尸参数审计记录
-├── scripts/                     # 工具脚本（回测/优化/数据下载/筛选）
+├── scripts/
+│   ├── backtest_zz500.py        # 主回测入口（本地 5min 数据，单股/批量/全集/抽样）
+│   ├── optimize_zz500_params.py # 传统网格寻优
+│   └── v3/                      # V3/V4 实验与 Optuna 优化
+│       └── optuna_stage_o.py    # Stage O 全局调参（Optuna 多 Trial 搜索）
 ├── src/
 │   └── at0/                     # 核心代码包
 │       ├── cli.py               # 统一 CLI（backtest/optimize/paper_monitor）
-│       ├── strategy.py          # 信号引擎（4 项规则投票，趋势跟随）
-│       ├── strategy_alpha.py    # P2 Alpha 连续评分（默认关闭）
+│       ├── strategy.py          # 信号引擎（规则投票，趋势跟随）
+│       ├── strategy_alpha.py    # Alpha 评分入口（compute_alpha_score_v3 多引擎融合）
 │       ├── backtest.py          # 回测引擎
 │       ├── risk.py              # 风控 + 成本模型 + 敞口策略
 │       ├── execution.py         # 交易生命周期 + 持仓追踪
 │       ├── screener.py          # 候选筛选（振幅/成交额/一字板/捕获空间）
 │       ├── features.py          # 指标计算（VWAP/ADX/KDJ/布林带）
-│       ├── regime.py            # regime 分类（@deprecated，Stage E 验证未通过）
+│       ├── regime.py            # regime 分类（@deprecated，已被 engines/regime_engine 取代）
 │       ├── config.py            # 参数加载（yaml → dataclass）
 │       ├── paths.py             # 路径常量（支持 AT0_DATA_DIR 环境变量）
 │       ├── data.py              # 数据源适配（mootdx/westock/baostock/eastmoney）
 │       ├── reports.py           # HTML 报告生成
 │       ├── logging_utils.py     # 日志工具
+│       ├── score/               # Alpha 评分（compute_alpha_score_v3，融合 Wave/Support/EM/Regime/Risk）
+│       ├── engines/             # V4 引擎层（见「引擎层」章节）
 │       └── measurement/         # 测量层（.pyc 形式，TSD 加密源码）
+├── web/                         # QuantWeb — Streamlit 回测平台
+│   ├── app.py                   # 入口（streamlit run web/app.py --server.port 8501）
+│   ├── results_db.py            # SQLite 结果持久化（data/quantweb.db）
+│   └── pages/                   # 仪表盘 / 配置 / 结果查看 / 策略对比 / Optuna / 参数配置
 ├── archive/                     # 已归档的阶段性诊断/实验脚本
 └── .gitignore
 ```
@@ -51,10 +62,29 @@ D:\project\data\
 
 ---
 
+## 研发流程（Stage 体系）
+
+策略研发按严格的串行 Stage 推进，每个 Stage **先有测量（Measurement）再谈 Alpha**；Stage 验收看**过程指标**（CE / Entry Delay / Exit Delay / MAE / Trend Quality）的 **median + IQR**，而非净利润：
+
+| Stage | 名称 | 关注点 |
+|---|---|---|
+| M | Measurement | 先能量化"买早了/卖晚了/还是运气"，再开发 Alpha |
+| W | Wave | 波浪位置引擎评分 |
+| S | Support | 动态支撑/阻力引擎评分 |
+| E | Expected Move | 未来收益预测引擎 |
+| H | Hold Confidence | 持仓信心评分（是否该继续持有） |
+| X | Predictive Exit | 趋势衰竭预测退出 |
+| D | Decision | 多引擎融合的统一决策层（DecisionEngineV4） |
+| O | Optuna | 全局调参（Stage O，多 Trial 搜索） |
+
+> 统计口径铁律：一律用 **median + IQR** 判定，不用均值（均值会被少数极端交易带偏）；样本量 < 30 对配对交易判 **INCONCLUSIVE**，不允许"看起来变好了"。
+
+---
+
 ## 环境准备
 
 - **Python 3.10**（`measurement/` 子包的 .pyc 为 cpython-310 编译）
-- 依赖：`mootdx`、`pandas`、`pyyaml`、`baostock`（按需安装，无 requirements.txt）
+- 依赖：`mootdx`、`pandas`、`pyyaml`、`baostock`、`streamlit`（Web 平台，无 requirements.txt，按需 `pip install streamlit`）
 - 数据：需提前下载 zz500 5min 数据到 `D:\project\data\zz500_5min\`（可用 `scripts/download_zz500_5min.py`）
 
 ---
@@ -94,6 +124,8 @@ python scripts/optimize_zz500_params.py --stage1-codes 30 --seed 42
 ```
 
 按板块分层抽样 30 只代表股，16 组合网格搜索，输出到 `outputs/backtest/zz500_param_optimization.json`。
+
+> 更系统的全局调参见 **Stage O（Optuna）**：`scripts/v3/optuna_stage_o.py`，或在 Web 平台「🎯 Optuna 优化」页发起；结果写入 `outputs/optuna/`。
 
 ### 4. 实时监控（research_only）
 
@@ -184,6 +216,27 @@ python -m at0.cli paper_monitor --source auto
 
 ---
 
+## 引擎层（V4 架构）
+
+`src/at0/engines/` 为可插拔引擎层，统一接口 `score(bars, snap, direction) -> float (0~100)`：
+
+| 引擎 | 文件 | 角色 |
+|---|---|---|
+| SupportEngine (G2) | support_engine.py | 动态支撑/阻力评分 |
+| WaveEngine (G4) | wave_engine.py | 波浪位置评分 |
+| ExpectedMoveEngine (G5) | expected_move_engine.py | 未来收益预测（qlib 预测） |
+| RegimeEngine (G7) | regime_engine.py | 市场状态识别 |
+| RiskEngine | risk_engine.py | 风险评分（Kelly sizing 支持） |
+| HoldConfidenceEngine | hold_confidence_engine.py | 持仓信心评分（Stage H） |
+| PredictiveExitEngine | predictive_exit_engine.py | 趋势衰竭预测退出（Stage X） |
+| DecisionEngineV4 | decision_engine.py | 统一决策层（Stage D），融合上述引擎 |
+
+- Alpha 评分入口：`src/at0/score/alpha_score.py` 的 `compute_alpha_score_v3(snap, params, direction)`，按 `v3_alpha_weights`（信号段）加权融合各引擎。
+- **关键约定**：`_bars` 未注入时五引擎（Wave/Support/ExpectedMove/Regime/Risk）会静默退化成常数；`compute_alpha_score_v3` 在 `v3_engines_in_backtest=True` 且缺 `_bars` 时显式 `raise`（fail-fast），`False` 时优雅复现旧基线。开关 `SignalParams.v3_engines_in_backtest`（默认 True）。
+- 废弃但未清理：`OpportunityEngine` / `ExecutionEngine`（被 DecisionEngineV4 / RiskEngine 取代，文件保留不再导出）。
+
+---
+
 ## 参数加载机制
 
 ```
@@ -247,6 +300,7 @@ python -m at0.cli <subcommand> [args...]
 | `verify_zz500_data.py` | 验证 zz500 数据完整性 |
 | `run_baseline_measurement.py` | P1 基线测量（5 类报告） |
 | `final_validation.py` | 最终验证（72 只缓存股票） |
+| `v3/optuna_stage_o.py` | Stage O 全局调参（Optuna 多 Trial 搜索，写入 outputs/optuna） |
 
 ---
 
@@ -261,6 +315,43 @@ python -m at0.cli <subcommand> [args...]
 | `{code}_{start}_{end}_trades.json` | 单股买卖触发记录 |
 | `{code}_{start}_{end}_report.json` | 单股完整回测报告 |
 | `outputs/runs/<run_id>/` | 版本化 artifacts（参数 + 数据指纹） |
+
+---
+
+## Web 平台（QuantWeb）
+
+基于 Streamlit 的回测平台，在浏览器中配置回测、查看运行结果与图表、对比策略、发起 Optuna 优化。
+
+### 运行
+
+```powershell
+# 必须从项目根目录启动，且 PYTHONPATH 含项目根（web 包依赖 `from web.results_db import`）
+$env:PYTHONPATH = "D:\project\a-t0-v2"
+& "C:\Users\kangrunze\AppData\Local\Programs\Python\Python310\python.exe" `
+    -m streamlit run web/app.py --server.port 8501 --server.headless true
+```
+
+> 注意：必须带 `PYTHONPATH=<项目根>`（或 `cd` 到项目根）。若仅设 `src`，`from web.results_db import` 会因 `web` 包找不到而失败。
+
+启动后访问 http://localhost:8501/ 。兼容 Streamlit 1.60（部分新 API 如 `text_area(font=)` 需 ≥1.62，当前未使用）。
+
+### 页面
+
+| 页面 | 说明 |
+|---|---|
+| 📊 综合仪表盘 | 运行概览与关键指标 |
+| ⚙️ 回测配置 | 选股票池/区间/参数，启动回测（后台线程，不阻塞 UI） |
+| 📈 结果查看 | 历史运行、个股净盈亏排行（以排名展示）、胜率/CE 分析、资金曲线、K 线图、明细 |
+| 🔬 策略对比 | A/B 对比（base vs candidate，Stage Gate 判定） |
+| 🎯 Optuna 优化 | 启动 Stage O 优化 + 查看历史 Trial 收敛 / 参数重要性 |
+| 🔧 参数配置 | 七维度权重 / 信号参数 / 风险参数 / 原始 YAML 编辑 |
+
+### 结果持久化（web/results_db.py）
+
+结果存入 `data/quantweb.db`（SQLite，首次运行 `init_db` 自动建表；**不纳入版本控制**）。表：`runs`（运行记录，含 `cancelled` 标记）、`results`（个股摘要）、`daily_results`（逐日明细）、`config_snapshots`（参数快照）。
+
+- **停止任务**：回测任务列表 / 进度轮询区均有「🛑 停止」按钮，写入 `cancelled=1`；后台循环每处理完一只股票检查该标记，命中则优雅终止（粒度 = 每股票）。
+- **懒加载**：结果查看页的图表视图用 `st.radio` + 条件执行（非 `st.tabs`），仅选中视图计算，避免切页时一次性加载多年 K 线数据导致卡顿。
 
 ---
 
@@ -293,4 +384,5 @@ python -m at0.cli <subcommand> [args...]
 ## 技术文档
 
 - [TECHNICAL_GUIDE.md](docs/TECHNICAL_GUIDE.md) — 运行手册、参数体系、止损安全网、模块架构
+- [QUANTWEB_PLAN.md](docs/QUANTWEB_PLAN.md) — Web 平台规划与路线图
 - [thin4_zombie_params_audit.md](docs/thin4_zombie_params_audit.md) — 僵尸参数审计记录
