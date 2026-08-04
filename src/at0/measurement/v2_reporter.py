@@ -109,9 +109,9 @@ def _fmt_num(v: float, decimals: int = 2) -> str:
 def _generate_overall_html(overall: dict) -> str:
     """生成总体指标 HTML 表格。"""
     pairs = overall.get("total_pairs", 0)
-    ce = overall.get("avg_ce", 0)
-    ed = overall.get("avg_entry_delay_bars", 0)
-    xd = overall.get("avg_exit_delay_bars", 0)
+    ce = overall.get("median_ce", overall.get("avg_ce", 0))  # 优先全池 median
+    ed = overall.get("median_entry_delay_bars", overall.get("avg_entry_delay_bars", 0))
+    xd = overall.get("median_exit_delay_bars", overall.get("avg_exit_delay_bars", 0))
     eg = overall.get("avg_execution_gain_pct", 0)
     rm = overall.get("avg_remaining_move_pct", 0)
     wn = overall.get("avg_wave_number", 0)
@@ -125,7 +125,7 @@ def _generate_overall_html(overall: dict) -> str:
       <table class="metric-table">
         <tr><th>指标</th><th>值</th><th>说明</th></tr>
         <tr><td>配对交易数</td><td class="value">{pairs}</td><td>已配对的交易对数</td></tr>
-        <tr><td>平均 CE</td><td class="value {'good' if ce > 0.4 else 'bad' if ce < 0.2 else ''}">{_fmt_pct(ce)}</td><td>捕获效率，目标 55%+</td></tr>
+        <tr><td>CE (全池 median)</td><td class="value {'good' if ce > 0.4 else 'bad' if ce < 0.2 else ''}">{_fmt_pct(ce)}</td><td>捕获效率，目标 55%+</td></tr>
         <tr><td>平均 Entry Delay</td><td class="value {'good' if ed < 5 else 'bad' if ed > 15 else ''}">{_fmt_num(ed, 1)} K</td><td>入场延迟K线数，目标 < 3</td></tr>
         <tr><td>平均 Exit Delay</td><td class="value">{_fmt_num(xd, 1)} K</td><td>退出延迟K线数（正=卖晚，负=卖早）</td></tr>
         <tr><td>平均 Exec Gain</td><td class="value {'bad' if eg > 1 else ''}">{_fmt_num(eg, 2)}%</td><td>偏离理想价格%，正值=买晚了</td></tr>
@@ -225,12 +225,17 @@ def _generate_attribution_html(attr: dict) -> str:
     wav = attr.get("wave_accuracy", {})
 
     def _ic_row(label: str, block: dict, key: str, expect: str) -> str:
-        ic = block.get(key, 0)
+        ic = block.get(key)
         n = block.get("n", 0)
-        ok = (ic > 0.05) if expect == "正" else (ic < -0.05)
-        cls = "good" if ok else ("bad" if abs(ic) < 0.05 else "")
+        if ic is None:
+            cls = "inconclusive"
+            ic_display = "— / INCONCLUSIVE"
+        else:
+            ok = (ic > 0.05) if expect == "正" else (ic < -0.05)
+            cls = "good" if ok else ("bad" if abs(ic) < 0.05 else "")
+            ic_display = f"{ic:+.4f}"
         return (f"<tr><td style='text-align:left'>{label}</td><td>{n}</td>"
-                f"<td class='value {cls}'>{ic:+.4f}</td><td>期望方向：{expect}</td></tr>")
+                f"<td class='value {cls}'>{ic_display}</td><td>期望方向：{expect}</td></tr>")
 
     buckets = conf.get("buckets") or []
     bucket_rows = "".join(

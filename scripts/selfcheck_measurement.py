@@ -147,7 +147,7 @@ def t_stats() -> None:
 
     check("完全同序 IC = 1", approx(spearman_ic([1, 2, 3, 4], [10, 20, 30, 40]), 1.0))
     check("完全反序 IC = -1", approx(spearman_ic([1, 2, 3, 4], [40, 30, 20, 10]), -1.0))
-    check("样本 < 3 返回 0", approx(spearman_ic([1, 2], [1, 2]), 0.0))
+    check("样本 < 3 返回 None（不可用，非 0）", spearman_ic([1, 2], [1, 2]) is None)
     check("并列值不抛异常", isinstance(spearman_ic([1, 1, 1, 2], [3, 3, 2, 1]), float))
 
 
@@ -242,10 +242,11 @@ def t_backtest_wiring() -> None:
     check("回测写入 alpha_ctx", "state.alpha_ctx = {" in src)
     check("成交记录带 engine_ctx", 'trade_record["engine_ctx"]' in src)
 
-    # 关键回归：engines 只在 bars 非空时实例化
+    # 关键回归：_bars 缺失且开启引擎时 fail-fast（不再静默退化为常数）
     asrc = (PROJECT_ROOT / "src" / "at0" / "score" / "alpha_score.py").read_text(encoding="utf-8")
-    check("alpha_score 仍以 _bars 作为 Engine 开关",
-          'snap.get("_bars", [])' in asrc and "_get_engines() if bars else {}" in asrc)
+    check("alpha_score 缺失 _bars 时 fail-fast（不再静默退化）",
+          'snap.get("_bars")' in asrc and "bars is None" in asrc
+          and "v3_engines_in_backtest" in asrc)
 
 
 def main() -> int:

@@ -630,14 +630,14 @@ def _rank(vals: list[float]) -> list[float]:
     return ranks
 
 
-def spearman_ic(xs: list[float], ys: list[float]) -> float:
+def spearman_ic(xs: list[float], ys: list[float]) -> Optional[float]:
     """Spearman 秩相关（RankIC）。
 
     用途：回答"引擎打的分，和这笔交易的实际结果，是不是同向"。
     这是 Confidence / Expected Accuracy 的定量口径 —— 比"平均分多少"有意义得多。
     """
     if len(xs) != len(ys) or len(xs) < 3:
-        return 0.0
+        return None
     rx, ry = _rank(xs), _rank(ys)
     n = len(rx)
     mx, my = sum(rx) / n, sum(ry) / n

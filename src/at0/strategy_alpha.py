@@ -183,5 +183,10 @@ def compute_alpha_score(snap: dict, params) -> tuple[float, dict]:
     from .score.alpha_score import compute_alpha_score_v3
 
     # snap 中 _direction 由 evaluate_all_signals 注入（reduce/add）
-    direction = snap.get("_direction", "reduce")
+    # H6: 缺失即报错，防静默用"reduce"错评买入腿
+    _direction = snap.get("_direction")
+    if _direction is None:
+        raise KeyError("strategy_alpha.compute_alpha_score: snap 缺少 _direction，"
+                       "调用方须注入 _direction='reduce' 或 'add'")
+    direction = _direction
     return compute_alpha_score_v3(snap, params, direction=direction)

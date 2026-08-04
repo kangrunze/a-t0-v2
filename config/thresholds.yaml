@@ -91,6 +91,16 @@ signal:
   expected_move_gate_enabled: true       # L4 闸门开关
   expected_move_rr_min: 2.0              # RR >= 2.0 才允许开仓（100股扫描最优）
 
+  # ── Stage X: Predictive Exit 趋势衰竭预测退出（2026-08-03）──
+  # 与 L6/L7 的互补关系：L6/L7 是 REACTIVE（趋势已死才退出），
+  # Predictive Exit 是 PROACTIVE（检测趋势即将结束的信号，提前退出）。
+  # 四维度：量能衰竭(30%) + 动量背离(30%) + 波动率高潮(20%) + 趋势成熟度(20%)
+  # 评分 ≥ 80 视为强退出信号，强制平仓。
+  # 仅在持仓时检查（平仓方向），不干预开仓。
+  # dataclass默认False（安全兜底），yaml设为true启用
+  predictive_exit_enabled: true            # Stage X 开关
+  predictive_exit_threshold: 80.0          # 评分 ≥ 80 强制平仓（0-100）
+
   # ── V4: L6 HoldConfidence + L7 TrendFailure 退出引擎（Decision Engine，2026-07-30）──
   # 用户方案：瓶颈在 Exit。Trailing 切香肠（持15min vs 主趋势60min）。
   # L6/L7 替代 Trailing：锚定趋势状态退出，NOT 盈亏回撤。

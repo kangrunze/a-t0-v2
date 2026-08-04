@@ -26,10 +26,13 @@ G1 占位实现：
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from ..models.feature_vector import FeatureVector
 from ..models.trade_candidate import TradeCandidate
+
+_logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -439,9 +442,22 @@ def compute_alpha_score_v3(
     fv = FeatureVector.from_snapshot(snap, direction=direction)
     weights = _load_v3_weights_from_yaml()
 
-    # V3: 如果 snap 中有 _bars，使用 Engine 计算（需要完整 K 线序列的维度）
-    bars = snap.get("_bars", [])
-    engines = _get_engines() if bars else {}
+    # V3: _bars 是 Engine 计算的前提（需要完整 K 线序列）
+    # - v3_engines_in_backtest=True（默认，对齐实盘）：缺失 _bars 必须 fail-fast，
+    #   防止 Engine 静默退化为常数（C2）。用显式 raise 而非 assert，
+    #   以免 `python -O` 下断言被剥离导致 fail-fast 失效。
+    # - v3_engines_in_backtest=False：显式复现旧基线，不要求 _bars，引擎置空。
+    use_engines = getattr(params, "v3_engines_in_backtest", True)
+    bars = snap.get("_bars")
+    if use_engines:
+        if bars is None:
+            raise ValueError(
+                f"compute_alpha_score_v3: v3_engines_in_backtest=True 但 snap 缺少 _bars，"
+                f"Engine 无法计算（direction={direction}）。调用方须注入 _bars=bars_up_to_now"
+            )
+        engines = _get_engines()
+    else:
+        engines = {}
 
     # Trend 维度：G1 占位 + G7 RegimeEngine 加权
     trend_s = score_trend(fv)

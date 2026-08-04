@@ -24,6 +24,13 @@ from .risk import RiskParams, DEFAULT_RISK_PARAMS, CostModel, ExposurePolicy
 from .backtest import BacktestParams
 from .screener import ScreenerParams
 
+
+def _warn_unknown_keys(section_name: str, yaml_keys: set, dataclass_keys: set) -> None:
+    """yaml 有但 dataclass 无的键 → 打印 WARNING 防静默失效。"""
+    unknown = yaml_keys - dataclass_keys
+    if unknown:
+        print(f"[WARNING] config: {section_name} 段包含未知键 {sorted(unknown)}，将被忽略", file=sys.stderr)
+
 # 项目根目录（src/at0/config.py → src/at0/ → src/ → 项目根）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
@@ -83,6 +90,7 @@ def load_signal_params() -> SignalParams:
     if not data or "signal" not in data:
         return DEFAULT_PARAMS
     sig = data["signal"]
+    _warn_unknown_keys("signal", set(sig.keys()), set(DEFAULT_PARAMS.__dataclass_fields__))
     kwargs = {}
     for k, v in sig.items():
         if hasattr(DEFAULT_PARAMS, k):
@@ -96,6 +104,7 @@ def load_risk_params() -> RiskParams:
     if not data or "risk" not in data:
         return DEFAULT_RISK_PARAMS
     risk = data["risk"]
+    _warn_unknown_keys("risk", set(risk.keys()), set(DEFAULT_RISK_PARAMS.__dataclass_fields__))
     kwargs = {}
     for k, v in risk.items():
         if hasattr(DEFAULT_RISK_PARAMS, k):
@@ -110,6 +119,7 @@ def load_backtest_params() -> BacktestParams:
         return BacktestParams()
     bt = data["backtest"]
     defaults = BacktestParams()
+    _warn_unknown_keys("backtest", set(bt.keys()), set(defaults.__dataclass_fields__))
     kwargs = {}
     for k, v in bt.items():
         if hasattr(defaults, k):
@@ -124,6 +134,7 @@ def load_screener_params() -> ScreenerParams:
         return ScreenerParams()
     sc = data["screener"]
     defaults = ScreenerParams()
+    _warn_unknown_keys("screener", set(sc.keys()), set(defaults.__dataclass_fields__))
     kwargs = {}
     for k, v in sc.items():
         if hasattr(defaults, k):
@@ -142,6 +153,7 @@ def load_cost_model() -> CostModel:
     cost = data["cost"]
     scenario = cost.get("scenario", "base")
     model = CostModel.from_scenario(scenario)
+    _warn_unknown_keys("cost", set(cost.keys()), {"commission_rate", "stamp_tax_rate", "slippage_rate", "impact_rate", "scenario"})
     kwargs = {}
     for k, v in cost.items():
         if k == "scenario":
@@ -161,6 +173,7 @@ def load_exposure_policy() -> ExposurePolicy:
         return ExposurePolicy()
     ep = data["exposure_policy"]
     defaults = ExposurePolicy()
+    _warn_unknown_keys("exposure_policy", set(ep.keys()), set(defaults.__dataclass_fields__))
     kwargs = {}
     for k, v in ep.items():
         if hasattr(defaults, k):

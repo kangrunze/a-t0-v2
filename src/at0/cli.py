@@ -233,12 +233,18 @@ def run(
         avg_cost = daily_prev_closes[first_date]
         print(f"[run_backtest] avg_cost 未指定，取首日 prev_close={avg_cost:.4f}")
 
-    # 4. 构造回测参数 + 频率自适应
+    # 4. 构造回测参数（从 yaml 加载，与 backtest_zz500.py 口径一致）
+    bt_params = load_backtest_params()
     params = BacktestParams(
         base_shares=base_shares,
         avg_cost=avg_cost,
-        signal_params=SignalParams(),
-        risk_params=RiskParams(),
+        signal_params=load_signal_params(),
+        risk_params=load_risk_params(),
+        cooldown_bars=bt_params.cooldown_bars,
+        max_holding_bars=bt_params.max_holding_bars,
+        stop_loss_ratio=bt_params.stop_loss_ratio,
+        trailing_ratio=bt_params.trailing_ratio,
+        trailing_activation_pct=bt_params.trailing_activation_pct,
     )
     params = adapt_params_by_frequency(params, frequency, bars_per_day)
     print(f"[run_backtest] warmup_bars={params.warmup_bars}, "

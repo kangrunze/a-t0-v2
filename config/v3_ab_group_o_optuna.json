@@ -1,0 +1,40 @@
+{
+  "name": "V3 Stage O — Optuna 参数优化验证",
+  "version": "1.0",
+  "description": "Stage O: 使用 Optuna TPE 对 V3 Alpha 7 个核心参数进行全局搜索优化。对比 baseline (当前 yaml 配置) 与 Optuna 最优参数组合。",
+  "created": "2026-08-04",
+  "experiment_dir": "outputs/optuna/",
+  "baseline": {
+    "label": "V3 Alpha Baseline (yaml 当前值)",
+    "params_override": {}
+  },
+  "treatment": {
+    "label": "V3 Alpha Optuna 最优",
+    "params_override": {}
+  },
+  "eval_config": {
+    "stock_pool": "config/v3_sample_100.txt",
+    "start_date": "2023-07-25",
+    "end_date": "2026-07-22",
+    "base_shares": 3000,
+    "stages": [
+      "IS (样本内): 2023-07-25 ~ 2025-01-22",
+      "OOS (样本外): 2025-01-23 ~ 2026-07-22"
+    ],
+    "metrics": [
+      "net_pnl", "profit_factor", "win_rate", "payoff_ratio",
+      "capture_efficiency", "sharpe_ratio", "max_drawdown",
+      "avg_trades_per_stock", "profitable_stocks_ratio"
+    ]
+  },
+  "objective_function": "0.35 * NetProfit + 0.25 * ProfitFactor + 0.20 * CaptureEfficiency + 0.10 * Sharpe + 0.05 * MaxDrawdown + 0.05 * TurnoverPenalty",
+  "search_space": {
+    "alpha_threshold_open": {"type": "int", "range": [60, 85], "current": 72},
+    "v3_alpha_stop_loss_ratio": {"type": "float", "range": [0.001, 0.005], "current": 0.002},
+    "v3_alpha_trailing_ratio": {"type": "float", "range": [0.15, 0.35], "current": 0.25},
+    "v3_alpha_close_threshold": {"type": "int", "range": [80, 95], "current": 85},
+    "expected_move_rr_min": {"type": "float", "range": [1.5, 3.0], "current": 2.0},
+    "trend_trailing_weakening": {"type": "float", "range": [0.03, 0.15], "current": 0.05},
+    "trend_trailing_failing": {"type": "float", "range": [0.01, 0.08], "current": 0.03}
+  }
+}

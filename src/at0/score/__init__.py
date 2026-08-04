@@ -15,7 +15,10 @@ Alpha 连续评分聚合器，替代旧的 3/4 布尔规则触发。
 
 G1 阶段：子评分用现有 features 计算（占位实现）。
 G2-G7：逐步替换为独立 Engine 产出的子评分。
-"""
-from .alpha_score import AlphaScoreAggregator, compute_alpha_score_v3
 
-__all__ = ["AlphaScoreAggregator", "compute_alpha_score_v3"]
+注意：AlphaScoreAggregator 已被 compute_alpha_score_v3 的 inline 聚合替代，
+保留在 alpha_score.py 中仅作参考，不再从本模块导出。
+"""
+from .alpha_score import compute_alpha_score_v3
+
+__all__ = ["compute_alpha_score_v3"]

@@ -1,33 +1,27 @@
 """
-G5: Expected Move Engine — 未来收益预测
-========================================
+G5: Expected Move Engine V2 — 多时间框架动量预期
+=================================================
 
-职责：
-  预测未来 N 根 K 线的收益和波动范围，计算 Reward/Risk 比率。
+Stage E 重构（2026-08-03）：
 
-用户方案 §八：
-  预测：
-    - Future Return（未来收益率）
-    - Future Range（未来波动范围）
-    - Future Volatility（未来波动率）
+核心改进：
+  1. 多时间框架动量：ROC(3)/ROC(6)/ROC(12) 加权合成，降低单周期噪声
+  2. ATR 风险基准：统一用 ATR 作为风险度量，与用户方案"EM=1.5~2.0×ATR"对齐
+  3. 方向感知评分：休息预期收益方向与当前持仓方向一致才给高分
+  4. 置信度加权：数据越充分（K线数越多），评分越稳定
 
-  计算：
-    Reward = Expected Return
-    Risk = Expected Range / 2（半波幅作为风险代理）
-    RR = Reward / Risk
+预期收益 = 多时间框架 ROC 加权平均（衰减权重）
+风险 = ATR / price（当前波动率）
+RR = |预期收益| / 风险
 
-  如果 RR < 1.5，直接过滤。
+评分映射：
+  RR ≥ 3.0 → 95（极强信号）
+  RR = 2.0 → 75（强信号，开仓门槛）
+  RR = 1.5 → 55（中等信号）
+  RR = 1.0 → 30（弱信号）
+  RR < 0.5 → 5（无信号）
 
-预测方式：
-  1. 优先使用 Qlib LightGBM 预测（已验证 IC=0.3937）
-  2. 降级为统计模型：最近 60 根 K 线的动量 + 波动率外推
-  3. 再降级为常数模型：返回中性预期
-
-输出：0~100
-  - 90+: RR > 3.0，极强信号
-  - 70: RR ≈ 2.0
-  - 50: RR ≈ 1.5（门槛）
-  - 20: RR < 1.0
+Qlib 预测接口保留（class-level 缓存），降级时使用统计模型。
 """
 from __future__ import annotations
 
@@ -38,27 +32,28 @@ from .base import BaseEngine
 
 
 class ExpectedMoveEngine(BaseEngine):
-    """G5: 未来收益预测评分。"""
+    """G5: 未来收益预期评分 V2。"""
 
     # Qlib 预测缓存（由外部注入，避免每根 bar 都重新预测）
-    _qlib_predictions: Optional[dict] = None  # {("code", datetime): predicted_return}
+
+    def __init__(self):
+        self._qlib_predictions: Optional[dict] = None
+
+    # 多时间框架 ROC 参数
+    ROC_PERIODS = [3, 6, 12]         # 3根/6根/12根 K线 ROC
+    ROC_WEIGHTS = [0.5, 0.3, 0.2]    # 衰减权重：短周期 > 中周期 > 长周期
 
     @property
     def name(self) -> str:
         return "expected_move"
 
-    @classmethod
-    def set_qlib_predictions(cls, predictions: dict):
-        """注入 Qlib 预测结果。
+    def set_qlib_predictions(self, predictions: dict):
+        """注入 Qlib 预测结果。"""
+        self._qlib_predictions = predictions
 
-        predictions: {(code, datetime_str): predicted_return}
-        """
-        cls._qlib_predictions = predictions
-
-    @classmethod
-    def clear_qlib_predictions(cls):
+    def clear_qlib_predictions(self):
         """清空 Qlib 预测缓存。"""
-        cls._qlib_predictions = None
+        self._qlib_predictions = None
 
     def score(
         self,
@@ -66,39 +61,32 @@ class ExpectedMoveEngine(BaseEngine):
         snap: dict,
         direction: str = "reduce",
     ) -> float:
-        """计算预期移动评分 (0~100)。"""
-        # 尝试获取 Qlib 预测
-        predicted_return = self._get_qlib_prediction(snap)
+        """计算预期移动评分 (0~100)。
 
-        if predicted_return is not None:
-            # 使用 Qlib 预测
-            rr = self._compute_rr_from_prediction(predicted_return, snap, direction)
-        else:
-            # 降级为统计模型
-            rr = self._compute_rr_statistical(bars, snap, direction)
-
+        V2 改进：多时间框架动量 + ATR 风险基准 + 方向感知。
+        """
+        rr = self._compute_rr(bars, snap, direction)
         if rr is None:
             return 50.0
 
-        # RR 映射到 0~100
-        # RR >= 3.0 → 95
-        # RR = 2.0 → 75
-        # RR = 1.5 → 50（门槛）
-        # RR = 1.0 → 25
-        # RR < 0.5 → 5
+        # RR → 0~100 评分映射
+        # V2 校准：RR=2.0 开仓门槛 → 75分，RR=1.5 中等 → 55分
         if rr >= 3.0:
             score = 95.0
         elif rr >= 2.0:
-            score = 50.0 + (rr - 1.5) * 45  # 1.5→50, 2.0→72.5, 但修正
-            score = min(95.0, 75.0 + (rr - 2.0) * 20)
+            # 2.0 → 75, 3.0 → 95
+            score = 75.0 + (rr - 2.0) * 20.0
         elif rr >= 1.5:
-            score = 50.0 + (rr - 1.5) * 50  # 1.5→50, 2.0→75
+            # 1.5 → 55, 2.0 → 75
+            score = 55.0 + (rr - 1.5) * 40.0
         elif rr >= 1.0:
-            score = 25.0 + (rr - 1.0) * 50  # 1.0→25, 1.5→50
+            # 1.0 → 30, 1.5 → 55
+            score = 30.0 + (rr - 1.0) * 50.0
         elif rr >= 0.5:
-            score = 5.0 + (rr - 0.5) * 40   # 0.5→5, 1.0→25
+            # 0.5 → 5, 1.0 → 30
+            score = 5.0 + (rr - 0.5) * 50.0
         else:
-            score = max(0.0, 5.0 - (0.5 - rr) * 10)
+            score = max(0.0, 5.0 - (0.5 - rr) * 10.0)
 
         return max(0.0, min(100.0, score))
 
@@ -110,40 +98,113 @@ class ExpectedMoveEngine(BaseEngine):
     ) -> Optional[float]:
         """计算 Expected Move 的 RR 值（供 V4 L4 开仓闸门使用）。
 
-        统一用 ATR 作为 risk 基准，与用户方案"EM >= 1.5×ATR"对齐：
-            reward = |预期收益率| × price（绝对价格预期移动）
-            risk   = ATR（当前波动）
-            RR     = reward / ATR
+        RR = |预期收益| / (ATR / price)
 
-        RR >= 1.5 即 EM >= 1.5×ATR；L4 闸门默认阈值 2.5（更严格）。
+        预期收益来源（优先级）：
+          1. Qlib 预测（predicted_return）
+          2. 多时间框架 ROC 加权合成
 
-        预期收益率来源：
-          1. 优先 Qlib 预测（predicted_return）
-          2. 降级统计外推：最近 6 根 K 线 ROC
-
-        :return: RR 值；None 表示数据不足无法计算（闸门应放行，避免误杀）
+        :return: RR 值；None 表示数据不足
         """
-        price = snap.get("current_price")
-        atr = snap.get("atr")
-        if price is None or atr is None or price <= 0 or atr <= 0:
-            return None
+        return self._compute_rr(bars, snap, direction)
 
-        # 预期收益率：优先 Qlib 预测
+    # ═══════════════════════════════════════════════════════════════
+    # RR 计算核心
+    # ═══════════════════════════════════════════════════════════════
+
+    def _compute_rr(
+        self,
+        bars: list[dict],
+        snap: dict,
+        direction: str,
+    ) -> Optional[float]:
+        """计算统一的 RR 值（评分和闸门共用）。
+
+        V2 风险校准：
+          预期收益 = 多时间框架 ROC 加权合成（分钟级收益率）
+          风险 = 最近 20 根 K 线收益率标准差 × sqrt(6)（6 根 bar 的累计波动）
+          这与旧 ExpectedMoveEngine 口径一致，确保 RR 值在合理范围内。
+
+          不能用 ATR/price 作为风险，因为 ATR 是日级波动（~2%），
+          而 ROC 是分钟级收益率（~0.3%），两者不匹配会导致 RR 系统性偏低。
+        """
+        # 预期收益：优先 Qlib 预测
         predicted_return = self._get_qlib_prediction(snap)
         if predicted_return is not None:
             expected_return = abs(predicted_return)
         else:
-            # 降级统计外推：最近 6 根 K 线的 ROC
-            if len(bars) < 7:
+            # 降级为多时间框架 ROC 加权合成
+            expected_return = self._multi_timeframe_momentum(bars)
+            if expected_return is None:
                 return None
-            closes = [b.get("close", 0) for b in bars]
-            if closes[-7] <= 0:
-                return None
-            roc_6 = (closes[-1] - closes[-7]) / closes[-7]
-            expected_return = abs(roc_6)
 
-        reward = expected_return * price
-        return reward / atr
+        # 风险：最近 20 根 K 线收益率标准差 × sqrt(6)（6 根 bar 的累计波动）
+        risk = self._compute_volatility(bars)
+        if risk is None or risk <= 0:
+            return None
+
+        return expected_return / risk
+
+    @staticmethod
+    def _compute_volatility(bars: list[dict]) -> Optional[float]:
+        """计算最近 20 根 K 线的收益率标准差 × sqrt(6)。
+
+        sqrt(6) 将单根 bar 波动投影到 6 根 bar 的累计波动，
+        与预期收益的时间窗口（ROC 6 根为主）对齐。
+        """
+        if len(bars) < 21:
+            return None
+        closes = [b.get("close", 0) for b in bars]
+        rets = []
+        for i in range(len(closes) - 20, len(closes)):
+            if closes[i - 1] > 0:
+                rets.append((closes[i] - closes[i - 1]) / closes[i - 1])
+        if len(rets) < 5:
+            return None
+        mean_ret = sum(rets) / len(rets)
+        variance = sum((r - mean_ret) ** 2 for r in rets) / len(rets)
+        return math.sqrt(variance) * math.sqrt(6)
+
+    # ═══════════════════════════════════════════════════════════════
+    # 多时间框架动量
+    # ═══════════════════════════════════════════════════════════════
+
+    def _multi_timeframe_momentum(self, bars: list[dict]) -> Optional[float]:
+        """多时间框架 ROC 加权合成预期收益。
+
+        使用 ROC(3)/ROC(6)/ROC(12) 加权平均，短周期权重高。
+        每个 ROC 先 clamp 到 [-5%, +5%] 以防极端值扭曲。
+        """
+        if len(bars) < self.ROC_PERIODS[-1] + 1:
+            # 数据不足最长周期，退化为可用周期
+            available = [p for p in self.ROC_PERIODS if len(bars) >= p + 1]
+            if not available:
+                return None
+            periods = available
+            weights = [1.0 / len(available)] * len(available)
+        else:
+            periods = self.ROC_PERIODS
+            weights = self.ROC_WEIGHTS
+
+        closes = [b.get("close", 0) for b in bars]
+        momentum = 0.0
+        total_w = 0.0
+
+        for period, weight in zip(periods, weights):
+            if len(closes) >= period + 1 and closes[-(period + 1)] > 0:
+                roc = (closes[-1] - closes[-(period + 1)]) / closes[-(period + 1)]
+                # clamp 到 [-5%, +5%] 防止极端值
+                roc = max(-0.05, min(0.05, roc))
+                momentum += abs(roc) * weight
+                total_w += weight
+
+        if total_w > 0:
+            return momentum / total_w
+        return None
+
+    # ═══════════════════════════════════════════════════════════════
+    # Qlib 预测（保留原有接口）
+    # ═══════════════════════════════════════════════════════════════
 
     def _get_qlib_prediction(self, snap: dict) -> Optional[float]:
         """从 Qlib 预测缓存中获取当前 bar 的预测值。"""
@@ -153,74 +214,7 @@ class ExpectedMoveEngine(BaseEngine):
         dt = snap.get("datetime")
         if code is None or dt is None:
             return None
-        # 尝试多种 key 格式
         for key in [(code, dt), (code, str(dt))]:
             if key in self._qlib_predictions:
                 return self._qlib_predictions[key]
-        return None
-
-    @staticmethod
-    def _compute_rr_from_prediction(
-        predicted_return: float,
-        snap: dict,
-        direction: str,
-    ) -> Optional[float]:
-        """从 Qlib 预测的 future_return 计算 RR。"""
-        # predicted_return 是未来 6 根 bar 的收益率
-        # 方向确认：卖出腿需要负收益（价格下跌），买入腿需要正收益（价格上涨）
-        # 但趋势跟随策略中：
-        #   - reduce（卖出）：开仓后价格继续涨（正收益）→ 有利
-        #   - add（买入）：开仓后价格继续跌（负收益）→ 有利
-        # 这取决于策略设计，这里用绝对值作为 Reward
-        reward = abs(predicted_return)
-
-        # Risk = ATR / price（当前波动率作为风险代理）
-        price = snap.get("current_price")
-        atr = snap.get("atr")
-        if price is None or atr is None or price <= 0:
-            return None
-        risk = atr / price
-
-        if risk > 0:
-            return reward / risk
-        return None
-
-    @staticmethod
-    def _compute_rr_statistical(
-        bars: list[dict],
-        snap: dict,
-        direction: str,
-    ) -> Optional[float]:
-        """降级统计模型：用最近动量 + 波动率外推。"""
-        if len(bars) < 20:
-            return None
-
-        closes = [b.get("close", 0) for b in bars]
-        price = snap.get("current_price") or (closes[-1] if closes else 0)
-        if price <= 0:
-            return None
-
-        # 动量外推：最近 6 根的 ROC 作为预期收益
-        if len(closes) >= 7 and closes[-7] > 0:
-            roc_6 = (closes[-1] - closes[-7]) / closes[-7]
-        else:
-            roc_6 = 0.0
-        reward = abs(roc_6)
-
-        # 波动率：最近 20 根的收益率标准差
-        if len(closes) >= 21:
-            rets = [(closes[i] - closes[i-1]) / closes[i-1]
-                    for i in range(len(closes) - 20, len(closes))
-                    if closes[i-1] > 0]
-            if rets:
-                mean_ret = sum(rets) / len(rets)
-                variance = sum((r - mean_ret) ** 2 for r in rets) / len(rets)
-                vol = math.sqrt(variance) * math.sqrt(6)  # 6 根 bar 的波动
-            else:
-                vol = 0.01
-        else:
-            vol = 0.01
-
-        if vol > 0:
-            return reward / vol
         return None

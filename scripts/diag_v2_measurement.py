@@ -24,10 +24,11 @@ DATA_DIR = Path(r"D:\project\data\zz500_5min")
 START = "2026-04-01"
 END = "2026-07-22"
 
-# 三组 A/B 测试 tag
+# A/B 测试 tag
 GROUPS = [
-    ("A_tf_baseline", "v3_b4_5_a_tf_baseline"),
-    ("B5_optimized", "v3_b5_optimized"),
+    ("S_support_v2", "s_support_v2"),
+    ("E_expected_v2", "e_expected_v2"),
+    ("H_holdconf_v2", "h_holdconf_v2"),
 ]
 
 

@@ -108,6 +108,17 @@ def compute_unrealized_pnl(
 # ═══════════════════════════════════════════════════════════════
 # 频率推断（P0-6: 供 _judge_trend_context 自适应 min_bars_for_trend）
 # ═══════════════════════════════════════════════════════════════
+def _to_minutes(s: str) -> int:
+    """解析 "HH:MM:SS" 或 "HH:MM" 为从午夜开始的分钟数。"""
+    parts = str(s).split(":")
+    if len(parts) >= 2:
+        try:
+            return int(parts[0]) * 60 + int(parts[1])
+        except ValueError:
+            return 0
+    return 0
+
+
 def _infer_frequency(bars: list[dict]) -> str:
     """
     从 bars 的时间戳推断频率（1min/5min）。
@@ -117,15 +128,6 @@ def _infer_frequency(bars: list[dict]) -> str:
     """
     if len(bars) < 2:
         return "1min"
-
-    def _to_minutes(s: str) -> int:
-        parts = s.split(":")
-        if len(parts) >= 2:
-            try:
-                return int(parts[0]) * 60 + int(parts[1])
-            except ValueError:
-                return 0
-        return 0
 
     diff = _to_minutes(bars[1].get("time", "")) - _to_minutes(bars[0].get("time", ""))
     if diff <= 0:
@@ -356,16 +358,16 @@ class BacktestParams:
     eod_check_bar_idx: int = 200            # 14:50 对应的K线索引（约第200根）
 
     # 信号约束（防止同方向连发、强制配对闭环）
-    cooldown_bars: int = 12                 # 信号触发后N根K线内不再触发同方向信号
+    cooldown_bars: int = 24                 # 信号触发后N根K线内不再触发同方向信号（yaml 定案值）
     require_opposite_direction: bool = True  # 有未配对腿时只允许反方向信号
 
     # 交易生命周期
-    max_holding_bars: int = 12              # 单笔最大持仓K线数，超过标记expired
+    max_holding_bars: int = 24              # 单笔最大持仓K线数（按频率适配覆盖，默认 yaml 定案值）
 
     # 止损/止盈结构
-    stop_loss_ratio: float = 0.008          # 固定止损比例
-    trailing_ratio: float = 0.5             # 移动止盈回撤比例（从最高点回吐50%触发）
-    trailing_activation_pct: float = 0.005  # 移动止盈激活门槛（0=旧行为，1tick盈利即激活）
+    stop_loss_ratio: float = 0.002          # 固定止损 0.2%（yaml 定案值，36股×3年网格最优）
+    trailing_ratio: float = 0.2             # 移动止盈回撤 20%（yaml 定案值，新VWAP基线网格最优）
+    trailing_activation_pct: float = 0.0    # 移动止盈激活门槛：0=有盈即锁（yaml 定案值）
 
     # 敞口策略
     exposure_policy: Optional[ExposurePolicy] = None  # None时用默认策略
@@ -713,18 +715,20 @@ def backtest_single_day(
                 # 从 open_legs 移除
                 state.lifecycle.open_legs.remove(tp_leg)
                 # 追加 trade record
+                close_cost = cost_model.calc_cost(close_dir, tp_leg.shares, tp_fill)
                 state.trades.append({
                     "time": bar.get("time", ""),
                     "date": trading_date,
                     "direction": close_dir,
                     "shares": tp_leg.shares,
                     "fill_price": round(tp_fill, 4),
-                    "cost": 0.0,
+                    "cost": round(close_cost, 4),
                     "pnl": round(tp_real_pnl, 4),
                     "paired": True,
                     "holding_bars": tp_leg.holding_bars,
                     "status": "mr_take_profit",
                 })
+                state.total_cost_paid += close_cost
                 state.cost_reduction += tp_real_pnl
                 if close_dir == "buy":
                     state.net_position_delta += tp_leg.shares
@@ -872,18 +876,20 @@ def backtest_single_day(
             # 否则止损亏损被藏起（与 expired 腿统计幻觉同类问题）。
             # check_stop_loss 已向 lifecycle.all_trades 追加，但 daily 结果
             # 只读 state.trades，故此处补登。
+            close_cost = cost_model.calc_cost(close_dir, stp_leg.shares, stop_fill)
             state.trades.append({
                 "time": bar.get("time", ""),
                 "date": trading_date,
                 "direction": close_dir,
                 "shares": stp_leg.shares,
                 "fill_price": round(stop_fill, 4),
-                "cost": 0.0,  # 止损成本已在开仓时计入
+                "cost": round(close_cost, 4),  # 平仓侧成本（佣金+印花税+滑点）
                 "pnl": round(stop_real_pnl, 4),
                 "paired": True,  # 止损视为已配对（强制平仓）
                 "holding_bars": stp_leg.holding_bars,
                 "status": "stopped",
             })
+            state.total_cost_paid += close_cost
             state.cost_reduction += stop_real_pnl
             # 持仓方向更新（开仓已计 net_position_delta，平仓需反向冲销）
             if close_dir == "buy":
@@ -1042,8 +1048,16 @@ def backtest_single_day(
             # 在回测中从未执行（实盘 strategy.evaluate_all_signals 却是执行的）。
             # 这里对齐实盘口径；置 v3_engines_in_backtest=False 可复现旧基线。
             if params.signal_params.v3_engines_in_backtest:
-                _snap_r = dict(_snap, _direction="reduce", _bars=bars_up_to_now)
-                _snap_a = dict(_snap, _direction="add", _bars=bars_up_to_now)
+                # 注入 _bars/_direction 供 Engine 计算（Stage M0.5 修复）
+                # 注入 _stop_loss_ratio/minute_of_day 供 RiskEngine 止损/时间维使用（H3）
+                _bar = bars_up_to_now[-1] if bars_up_to_now else {}
+                _time_str = _bar.get("time", "")
+                _mod = _to_minutes(_time_str)
+                _sl = params.effective_stop_loss_ratio
+                _snap_r = dict(_snap, _direction="reduce", _bars=bars_up_to_now,
+                               _stop_loss_ratio=_sl, minute_of_day=_mod)
+                _snap_a = dict(_snap, _direction="add", _bars=bars_up_to_now,
+                               _stop_loss_ratio=_sl, minute_of_day=_mod)
             else:
                 _snap_r = dict(_snap, _direction="reduce")
                 _snap_a = dict(_snap, _direction="add")
@@ -1062,62 +1076,24 @@ def backtest_single_day(
                             if isinstance(v, (int, float))},
                 "engines_active": bool(params.signal_params.v3_engines_in_backtest),
             }
-            # 开仓用 alpha_threshold_open；平仓用 v3_alpha_close_threshold（默认85，更高）
-            _close_th = params.signal_params.v3_alpha_close_threshold
-            if _close_th is None:
-                _close_th = params.signal_params.alpha_threshold_open
-            _open_th = params.signal_params.alpha_threshold_open
-            # 有持仓时，对向信号是平仓 → 用 _close_th；无持仓时是开仓 → 用 _open_th
-            _reduce_th = _close_th if has_buy_open else _open_th
-            _add_th = _close_th if has_sell_open else _open_th
-            reduce_ok = _alpha_r >= _reduce_th and not is_limit_up_locked
-            add_ok = _alpha_a >= _add_th and not is_limit_down_locked
-
-            # V4: L4 Expected Move 开仓闸门（Decision Engine，2026-07-30）
-            # 用户方案：Alpha 够用，瓶颈在 Exit。L4 作为开仓闸门防"买晚"：
-            #   仅在开仓时检查（平仓不检查），RR < 阈值拒绝开仓
-            #   RR = |预期收益|×price / ATR，衡量剩余空间 vs 当前波动
-            #   机制：Alpha=95 但剩余空间不足时放弃，自然拉远买卖点距离
-            if params.signal_params.expected_move_gate_enabled:
-                from at0.score.alpha_score import compute_expected_move_rr as _em_rr
-                _rr_min = params.signal_params.expected_move_rr_min
-                # reduce 开仓（not has_buy_open = 新建 sell 仓）：检查 RR
-                if reduce_ok and not has_buy_open:
-                    _rr_r = _em_rr(bars_up_to_now, _snap, "reduce")
-                    state.alpha_ctx["expected_rr_reduce"] = _rr_r
-                    if _rr_r is not None and _rr_r < _rr_min:
-                        reduce_ok = False
-                # add 开仓（not has_sell_open = 新建 buy 仓）：检查 RR
-                if add_ok and not has_sell_open:
-                    _rr_a = _em_rr(bars_up_to_now, _snap, "add")
-                    state.alpha_ctx["expected_rr_add"] = _rr_a
-                    if _rr_a is not None and _rr_a < _rr_min:
-                        add_ok = False
-
-            # V4: L6 HoldConfidence + L7 TrendFailure 退出引擎（Decision Engine，2026-07-30）
-            # 用户方案：Trailing 切香肠（持15min vs 主趋势60min）。
-            # L6/L7 锚定趋势状态退出，NOT 盈亏回撤：
-            #   L6: 持仓信心 < 阈值 → 强制平仓（趋势衰减，不等 Trailing）
-            #   L7: 趋势硬失败（2+信号）→ 立即平仓（趋势已死，即使+0.3%也走）
-            # 仅在持仓时检查（平仓方向），不干预开仓
-            if params.signal_params.hold_confidence_exit_enabled:
-                from at0.engines.hold_confidence_engine import (
-                    HoldConfidenceEngine as _HCE, check_trend_failure as _CTF,
-                )
-                _hc_engine = _HCE()
-                _hc_th = params.signal_params.hold_confidence_exit_threshold
-                # buy 仓平仓（reduce 信号）：评估 buy 仓持有信心
-                if has_buy_open and not reduce_ok:
-                    _hc = _hc_engine.score(bars_up_to_now, _snap_r, "reduce")
-                    _tf, _tf_reason = _CTF(_snap_r, "reduce")
-                    if _tf or _hc < _hc_th:
-                        reduce_ok = True and not is_limit_up_locked
-                # sell 仓平仓（add 信号）：评估 sell 仓持有信心
-                if has_sell_open and not add_ok:
-                    _hc = _hc_engine.score(bars_up_to_now, _snap_a, "add")
-                    _tf, _tf_reason = _CTF(_snap_a, "add")
-                    if _tf or _hc < _hc_th:
-                        add_ok = True and not is_limit_down_locked
+            # Stage D: DecisionEngineV4 统一决策（2026-08-03）
+            # 替代 inline 决策逻辑，封装为单一决策入口：
+            #   Alpha 阈值 → L4 开仓闸门 → L6/L7 退出 → Stage X 退出
+            # 行为与旧 inline 逻辑逐笔一致，仅增加决策日志记录。
+            from at0.engines.decision_engine import DecisionEngineV4 as _DEV4
+            _d_result = _DEV4.decide(
+                bars_up_to_now=bars_up_to_now,
+                snap_r=_snap_r, snap_a=_snap_a,
+                alpha_r=_alpha_r, alpha_a=_alpha_a,
+                sub_r=_sub_r, sub_a=_sub_a,
+                has_buy_open=has_buy_open, has_sell_open=has_sell_open,
+                params=params, state=state,
+                is_limit_up_locked=is_limit_up_locked,
+                is_limit_down_locked=is_limit_down_locked,
+            )
+            reduce_ok = _d_result.reduce_ok
+            add_ok = _d_result.add_ok
+            state.alpha_ctx.update(_d_result.decision_log)
 
         # 约束: cooldown_bars
         if (params.effective_cooldown_bars > 0 and state.last_signal_bar >= 0

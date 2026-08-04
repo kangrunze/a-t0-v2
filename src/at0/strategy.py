@@ -194,6 +194,17 @@ class SignalParams:
     # 原因：强趋势中 L7 信号（EMA20破位/MACD反转）多为噪声，收紧 trailing 会切断趋势利润
     l7_strong_trend_protection_adx: float = 35.0  # 强趋势保护 ADX 门槛（≥此值不收紧 trailing）
 
+    # ── Stage X: Predictive Exit 趋势衰竭预测退出（2026-08-03）──
+    # 与 L6/L7 的互补关系：
+    #   L6/L7 是 REACTIVE：趋势已死才退出。
+    #   Predictive Exit 是 PROACTIVE：检测趋势即将结束的信号，提前退出。
+    # 四维度信号：量能衰竭(30%) + 动量背离(30%) + 波动率高潮(20%) + 趋势成熟度(20%)
+    # 评分 ≥ predictive_exit_threshold 时强制平仓（提前退出避免深度回调）
+    # 仅在持仓时检查（平仓方向），不干预开仓
+    # dataclass默认False（安全兜底），thresholds.yaml设为true启用
+    predictive_exit_enabled: bool = False
+    predictive_exit_threshold: float = 80.0   # 评分 ≥ 80 视为强退出信号
+
     # Layer P — 平仓层（is_for_pairing=True 时使用）
     # 趋势跟随平仓：趋势反转信号（ADX回落/VWAP穿越/KDJ反向）
     pairing_vwap_dev_threshold: float = 0.008  # 平仓阈值下限（0.8%），open_vwap_dev 缺失时退化为此值
