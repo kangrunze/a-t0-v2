@@ -414,6 +414,11 @@ class BacktestParams:
     # 放宽激活门槛导致止损先于trailing触发，avg_loss膨胀，净亏
     # None=不覆盖（用全局trailing_activation_pct），float=覆盖值
     v3_alpha_trailing_activation_pct: Optional[float] = 0.0
+    # V3 专属最大持仓K线数（None=按频率自适应，不覆盖）
+    # 2026-08-05: 新增，支持 swing 波段模式的跨日持有
+    # adapt_params_by_frequency 会按频率覆盖 max_holding_bars，
+    # 此字段作为 V3 模式的独立覆盖，不受 adapt_params_by_frequency 影响。
+    v3_alpha_max_holding_bars: Optional[int] = None
 
     @property
     def is_mean_reversion(self) -> bool:
@@ -450,9 +455,11 @@ class BacktestParams:
 
     @property
     def effective_max_holding_bars(self) -> int:
-        """最大持仓K线数：MR 模式且配置了 mr_max_holding_bars 时覆盖。"""
+        """最大持仓K线数：MR/V3 模式有专属覆盖时覆盖。"""
         if self.is_mean_reversion and self.mr_max_holding_bars is not None:
             return self.mr_max_holding_bars
+        if self.is_v3_alpha and self.v3_alpha_max_holding_bars is not None:
+            return self.v3_alpha_max_holding_bars
         return self.max_holding_bars
 
     @property

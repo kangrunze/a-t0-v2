@@ -235,6 +235,13 @@ def run(
 
     # 4. 构造回测参数（从 yaml 加载，与 backtest_zz500.py 口径一致）
     bt_params = load_backtest_params()
+    # 收集所有 V3 专属覆盖参数（swing 模式下通过 overlay 设置）
+    v3_kwargs = {}
+    for _k in ("v3_alpha_stop_loss_ratio", "v3_alpha_trailing_ratio",
+               "v3_alpha_trailing_activation_pct", "v3_alpha_max_holding_bars"):
+        _v = getattr(bt_params, _k, None)
+        if _v is not None:
+            v3_kwargs[_k] = _v
     params = BacktestParams(
         base_shares=base_shares,
         avg_cost=avg_cost,
@@ -245,8 +252,13 @@ def run(
         stop_loss_ratio=bt_params.stop_loss_ratio,
         trailing_ratio=bt_params.trailing_ratio,
         trailing_activation_pct=bt_params.trailing_activation_pct,
+        **v3_kwargs,
     )
     params = adapt_params_by_frequency(params, frequency, bars_per_day)
+    # 同步 exposure_policy.max_holding_bars 到 effective_max_holding_bars
+    # 确保 V3 模式的 v3_alpha_max_holding_bars 覆盖生效
+    if params.exposure_policy is not None:
+        params.exposure_policy.max_holding_bars = params.effective_max_holding_bars
     print(f"[run_backtest] warmup_bars={params.warmup_bars}, "
           f"eod_check_bar_idx={params.eod_check_bar_idx}")
 

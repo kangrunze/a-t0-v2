@@ -1,0 +1,68 @@
+# ═══════════════════════════════════════════════════════════════
+# swing — 波段交易策略 Overlay
+# ═══════════════════════════════════════════════════════════════
+# 设计目标：实现真正的"低买高卖"，买卖点距离显著拉大，可跨天持有。
+#
+# v1 失败：参数过于严格，0交易
+# v2 最佳：净盈亏+550，盈亏比1.47，avg_win 3x，但仅1只盈利
+# v3 恶化：提高门槛后交易量减半，净亏-1917
+# 
+# v4 最佳（2026-08-05）：
+#   结果：净盈亏+1,418，盈亏比3.71，avg_win 120.37（3.6x），avg_loss -32.43（低于基线）
+#   验证了"宽trailing+紧止损"的正确性
+#   问题：胜率仅37.4%，仅2只股票盈利
+#
+# v4 最优（2026-08-05）：
+#   结果：净盈亏+1,418，盈亏比3.71，avg_win 120.37（3.6x），avg_loss -32.43（低于基线）
+#   v5（activation_pct=0.005）：净盈亏降至+827，胜率从37.4%→21.9%，恶化
+#   结论：v4（activation_pct=0.002）是最优配置
+#
+# v6 思路：在v4最优参数基础上，启用振幅筛选（min_amplitude_long=0.0494）
+#   预期：振幅筛选排除低波动股票，提高盈利股票比例
+
+# ── 决策层信号参数覆盖 ──
+signal:
+  use_continuous_alpha: true
+  alpha_threshold_open: 72.0            # 基线72（不变）
+  v3_alpha_close_threshold: 85.0        # 基线85（不变）
+
+  v3_alpha_weights:
+    trend: 0.25
+    wave: 0.20
+    support: 0.15
+    momentum: 0.15
+    liquidity: 0.10
+    expected_move: 0.10
+    risk: 0.05
+
+  expected_move_gate_enabled: true
+  expected_move_rr_min: 2.0
+
+  trend_adaptive_trailing_enabled: true
+  predictive_exit_enabled: false
+  hold_confidence_exit_enabled: false
+  atr_adaptive_trailing_enabled: false
+  retracement_entry_enabled: false
+  surge_exit_enabled: false
+
+  tf_adx_threshold: 30.0
+  tf_vol_ratio_min: 1.5
+
+# ── 回测参数覆盖 ──
+backtest:
+  stop_loss_ratio: 0.002                # 紧止损
+  trailing_ratio: 0.35                  # 宽trailing
+  trailing_activation_pct: 0.002        # 0.2%激活
+
+  v3_alpha_stop_loss_ratio: 0.002
+  v3_alpha_trailing_ratio: 0.35
+  v3_alpha_trailing_activation_pct: 0.002
+
+  cooldown_bars: 24
+  v3_alpha_max_holding_bars: 96         # 跨日持有
+
+# ── 风控参数覆盖（保持基线）──
+risk:
+  max_t_trades_per_day: 4
+  min_capture_spread: 0.0072
+  min_net_expected_return: 0.0045

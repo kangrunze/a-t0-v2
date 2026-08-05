@@ -316,6 +316,10 @@ def run_zz500_single(
     )
     # 先按频率适配 warmup/eod（这两个不参与 override）
     params = adapt_params_by_frequency(params, frequency, bars_per_day)
+    # 同步 exposure_policy.max_holding_bars 到 effective_max_holding_bars
+    # 确保 V3 模式的 v3_alpha_max_holding_bars 覆盖生效
+    if params.exposure_policy is not None:
+        params.exposure_policy.max_holding_bars = params.effective_max_holding_bars
     # 适配后再应用 bp override（避免被 adapt 覆盖 max_holding_bars 等）
     if bp_kwargs:
         params = _replace(params, **bp_kwargs)
