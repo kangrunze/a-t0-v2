@@ -1067,12 +1067,16 @@ def backtest_single_day(
                 _mod = _to_minutes(_time_str)
                 _sl = params.effective_stop_loss_ratio
                 _snap_r = dict(_snap, _direction="reduce", _bars=bars_up_to_now,
-                               _stop_loss_ratio=_sl, minute_of_day=_mod)
+                               _stop_loss_ratio=_sl, minute_of_day=_mod,
+                               code=code, datetime=_time_str)
                 _snap_a = dict(_snap, _direction="add", _bars=bars_up_to_now,
-                               _stop_loss_ratio=_sl, minute_of_day=_mod)
+                               _stop_loss_ratio=_sl, minute_of_day=_mod,
+                               code=code, datetime=_time_str)
             else:
-                _snap_r = dict(_snap, _direction="reduce")
-                _snap_a = dict(_snap, _direction="add")
+                _snap_r = dict(_snap, _direction="reduce",
+                               code=code, datetime=_bar.get("time", ""))
+                _snap_a = dict(_snap, _direction="add",
+                               code=code, datetime=_bar.get("time", ""))
             _alpha_r, _sub_r = compute_alpha_score(_snap_r, params.signal_params)
             _alpha_a, _sub_a = compute_alpha_score(_snap_a, params.signal_params)
             # ── Stage M0 Trade Event Logger ──
@@ -1281,6 +1285,7 @@ def backtest_multi_day(
     l1_risk_dates: set[str] | None = None,
     retreated_dates: set[str] | None = None,
     regime_filter_enabled: bool = False,
+    qlib_predictions: Optional[dict] = None,
 ) -> dict:
     """
     对单只股票多个交易日进行回测。
@@ -1319,6 +1324,37 @@ def backtest_multi_day(
     l1_risk_dates = l1_risk_dates or set()
     retreated_dates = retreated_dates or set()
 
+    # Qlib 预测注入（可选）：传入预测 dict 后，ExpectedMoveEngine 优先用 Qlib 预测
+    # 而非降级的 ROC 动量。回测结束（含异常路径）后必须清理，防跨 run 泄漏。
+    # 注入日志由调用方（run_zz500_single）打印一次，这里不逐股票 print。
+    _em_engine = None
+    if qlib_predictions is not None:
+        from .score.alpha_score import _get_engines
+        _em_engine = _get_engines().get("expected_move")
+        if _em_engine is not None:
+            _em_engine.set_qlib_predictions(qlib_predictions)
+
+    try:
+        return _backtest_multi_day_impl(
+            code, daily_bars, daily_prev_closes, params,
+            l1_risk_dates, retreated_dates, regime_filter_enabled,
+        )
+    finally:
+        # 无论成功/异常都清理，防止预测缓存泄漏到下一只股票（跨 run 污染）
+        if _em_engine is not None:
+            _em_engine.clear_qlib_predictions()
+
+
+def _backtest_multi_day_impl(
+    code: str,
+    daily_bars: dict[str, list[dict]],
+    daily_prev_closes: dict[str, float],
+    params: BacktestParams,
+    l1_risk_dates: set[str],
+    retreated_dates: set[str],
+    regime_filter_enabled: bool,
+) -> dict:
+    """backtest_multi_day 主体（qlib 注入由外层 try/finally 包裹）。"""
     # Stage E: 预计算每日 regime（严格因果：用截至昨日的日K）
     regimes_by_date: dict[str, str] = {}
     filtered_days: list[str] = []

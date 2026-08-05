@@ -207,14 +207,25 @@ class ExpectedMoveEngine(BaseEngine):
     # ═══════════════════════════════════════════════════════════════
 
     def _get_qlib_prediction(self, snap: dict) -> Optional[float]:
-        """从 Qlib 预测缓存中获取当前 bar 的预测值。"""
+        """从 Qlib 预测缓存中获取当前 bar 的预测值。
+
+        兼容多种 code 格式：6位纯代码（600000）和 Qlib instrument（sh600000）。
+        """
         if self._qlib_predictions is None:
             return None
         code = snap.get("code")
         dt = snap.get("datetime")
         if code is None or dt is None:
             return None
+        # 尝试原始 code + dt/str(dt)
         for key in [(code, dt), (code, str(dt))]:
             if key in self._qlib_predictions:
                 return self._qlib_predictions[key]
+        # 兼容 instrument 格式（sh600000 / sz000009）
+        if len(code) == 6:
+            prefix = "sh" if code[0] == "6" else "sz"
+            inst = f"{prefix}{code}"
+            for key in [(inst, dt), (inst, str(dt))]:
+                if key in self._qlib_predictions:
+                    return self._qlib_predictions[key]
         return None

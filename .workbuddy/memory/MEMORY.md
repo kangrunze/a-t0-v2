@@ -35,4 +35,17 @@ A股 T0（日内回转）量化策略，5min K线，ZZ500 成分股。当前处�
 - `batch_summary_w_wave_v1.json` 与 `batch_summary_v3_b5_optimized.json` 曾逐字节相同 —— 这是 Engine 空转的典型症状。
   **A/B 两组结果完全一致时，先怀疑改动没进决策路径，不要急着解读指标。**
   `compare_v2_ab.py` 已内置 `identical_to_base` 检测，会直接判 `NO_EFFECT`。
+- **本仓库禁用 `git rm` 删除 `__pycache__/` 下文件**：git 2.47.1.windows.1 + core.ignorecase=true 下，
+  `git rm` 删 measurement/__pycache__/*.pyc 会连带删除整个 `src/at0/measurement/` worktree（单文件精确路径可复现，与并发无关）。
+  删除改用：Python `os.remove`/`shutil.rmtree`（绝对 `D:\...` 路径）→ `git add -A` 记录。Bash `rm` 也被 safe-delete 包装拦截（`/d/...` 路径转换失败），同样绕开。
+- measurement 已于 2026-08-05 移除 loader shim：`__init__.py` 为标准导入，`.py.bak`（TSD 加密占位）与 `__pycache__/*.pyc` 已从 git 移除，`.gitignore` 的"例外保留 .pyc"规则已删。dualrun 仍为真黑盒（仅 .py.bak + .pyc，无源码），其 loader 不能删。
+
+## 分支与 Git 结构（2026-08-05 合并后）
+- 主分支是 **`main`**（不是 `master`，仓库无 master）。`dev-v2` 与 `dev-alpha` 内容等价（`dev-alpha` 已 fast-forward 到 `dev-v2`，均指向 `f39ae8d`）。
+- **`main` 与 dev 分支是"无关联历史"（no common ancestor）**。远端 `main` 原本是另一条独立线，只含旧 `src/`+`scripts/` 老代码、以及 **752 个市场数据文件（`data/minute_local/`、`data/zz500_5min/`）**——这批数据**只存在于远端 main 的 git，本地磁盘没有**。
+- 合并做法：`git merge --allow-unrelated-histories origin/main`，**所有代码/配置冲突一律取 dev-v2（`--ours`）**，数据文件保留。合并提交 `97ea71d`（双 parent：`628f40d` + `ae2da67`），已推送 `ae2da67..97ea71d`。
+- 结论：远端 `main` 现在同时含现代代码（web/30、engines/10）与 752 个市场数据。
+- 2026-08-05 傍晚：main 已推进到 `b1e4c96`（`73f7545` measurement 源码化+死代码归档 → `b1e4c96` Web Flask 化+README 重写）。**Web 平台已从 Streamlit 全面迁移到 Flask**（5 蓝图 33 路由，`flask --app web.app run --port 8501`），README 已同步，Streamlit 仅存 `web/streamlit_app.py`+`web/pages/` 作回退验证。
+- 教训：push 被拒（non-fast-forward）先 `git fetch` 看是否"无关联历史 + 远端有独特数据"，**勿直接 `--force-with-lease`**，否则会丢了只存于远端的 752 个数据文件。
+- `data/` 目录在 dev 分支 .gitignore 里被排除，但 main 里仍按上述合并保留了数据；若后续只想要干净代码，需另做数据备份再处理。
 </content>

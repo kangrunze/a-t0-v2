@@ -337,11 +337,61 @@ def run_zz500_single(
           f"tf_adx={params.signal_params.tf_adx_threshold}, "
           f"min_cap={params.risk_params.min_capture_spread}")
 
+    # ── Qlib 预测（可选）：训练 LightGBM 模型，将预测注入 ExpectedMoveEngine ──
+    # qlib_enabled=False 时走原有 ROC 降级路径，设为 True 启用 Qlib 预测。
+    # 前置条件：pip install qlib lightgbm
+    qlib_predictions = None
+    qlib_enabled = False  # ← 改为 True 启用
+    if qlib_enabled:
+        try:
+            from at0.qlib import is_qlib_available, is_lightgbm_available
+            if is_qlib_available() and is_lightgbm_available():
+                from at0.qlib.adapter import build_qlib_dataset
+                from at0.qlib.model import train_model
+                from at0.qlib.loader import _normalize_code_to_instrument
+
+                pure_code = normalize_code(code)["pure"]
+                # 训练区间需要比回测区间更早，确保有足够训练样本
+                train_start = "2024-01-01" if start_date > "2024-06-01" else start_date
+                print(f"[qlib] 训练 {pure_code} ({train_start}~{end_date}) ...")
+                dataset = build_qlib_dataset(
+                    codes=[pure_code],
+                    start_date=train_start,
+                    end_date=end_date,
+                    label_horizon=6,
+                    train_end="2025-06-30",
+                    valid_end="2025-12-31",
+                    verbose=True,
+                )
+                if not dataset.get("degraded"):
+                    model_result = train_model(dataset, verbose=True)
+                    print(f"[qlib] IC={model_result.ic:.4f}, 预测={len(model_result.predictions)} 条")
+
+                    # 转换为 ExpectedMoveEngine 期望的 {(code, datetime): value} 格式
+                    # predictions index 是 (datetime, instrument)
+                    inst = _normalize_code_to_instrument(pure_code)
+                    qlib_predictions = {}
+                    for idx, val in model_result.predictions.items():
+                        dt, _ = idx
+                        fv = float(val)
+                        # 同时存纯代码和 instrument 格式，兼容 snap 中 code 字段
+                        qlib_predictions[(pure_code, dt)] = fv
+                        qlib_predictions[(pure_code, str(dt))] = fv
+                        qlib_predictions[(inst, dt)] = fv
+                        qlib_predictions[(inst, str(dt))] = fv
+                else:
+                    print(f"[qlib] Dataset 降级: {dataset.get('error')}")
+            else:
+                print("[qlib] Qlib 或 LightGBM 未安装，跳过")
+        except Exception as ex:
+            print(f"[qlib] 训练失败，回退到 ROC 降级: {ex}")
+
     result = backtest_multi_day(
         code=normalize_code(code)["pure"],
         daily_bars=daily_bars,
         daily_prev_closes=daily_prev_closes,
         params=params,
+        qlib_predictions=qlib_predictions,
     )
 
     code_tag = normalize_code(code)["pure"]
