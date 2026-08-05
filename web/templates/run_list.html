@@ -4,10 +4,9 @@
 {% block content %}
 <div class="page-header">
     <h2>运行列表</h2>
-    <div class="caption">选择一次回测运行查看详情</div>
+    <div class="caption">选择一次回测运行查看详情；运行中可停止，历史记录可删除（含数据）</div>
 </div>
 
-{% if runs %}
 <div class="card">
     <div class="card-body p-0">
         <table class="table table-hover mb-0">
@@ -20,10 +19,10 @@
                     <th>股票池</th>
                     <th>范围</th>
                     <th>耗时</th>
-                    <th></th>
+                    <th>操作</th>
                 </tr>
             </thead>
-            <tbody>
+            <tbody id="runs-tbody">
                 {% for r in runs %}
                 <tr>
                     <td class="num-mono">{{ r.id }}</td>
@@ -38,6 +37,8 @@
                         <span class="text-down"><i class="bi bi-exclamation-circle-fill"></i> 失败</span>
                         {% elif r.status == 'cancelled' %}
                         <span class="text-secondary"><i class="bi bi-slash-circle"></i> 已取消</span>
+                        {% elif r.status == 'pending' %}
+                        <span class="text-secondary"><i class="bi bi-hourglass-split"></i> 排队中</span>
                         {% else %}
                         <span class="text-secondary">{{ r.status }}</span>
                         {% endif %}
@@ -45,7 +46,7 @@
                     <td class="num-mono">{{ r.stock_pool or '—' }}</td>
                     <td class="num-mono">{{ (r.start_date or '?')[:10] }} ~ {{ (r.end_date or '?')[:10] }}</td>
                     <td class="num-mono">{{ '%.1fs'|format(r.duration_s) if r.duration_s else '—' }}</td>
-                    <td>
+                    <td class="text-nowrap">
                         <a href="{{ url_for('run.detail', run_id=r.id) }}" class="btn btn-outline-secondary btn-sm">
                             <i class="bi bi-eye"></i> 查看
                         </a>
@@ -56,8 +57,9 @@
         </table>
     </div>
 </div>
-{% else %}
-<div class="card">
+
+{% if not runs %}
+<div class="card mt-3">
     <div class="card-body text-center py-5">
         <i class="bi bi-inbox" style="font-size:2rem;color:var(--color-text-secondary);"></i>
         <p class="text-secondary mt-2">还没有回测运行记录。前往「研究工作台」发起第一次回测。</p>
@@ -67,4 +69,113 @@
     </div>
 </div>
 {% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const STATUS = {
+    completed: ['完成',   'text-up',       'bi-check-circle-fill'],
+    running:   ['运行中', 'text-warning',  'bi-arrow-repeat'],
+    failed:    ['失败',   'text-down',     'bi-exclamation-circle-fill'],
+    cancelled: ['已取消', 'text-secondary', 'bi-slash-circle'],
+    pending:   ['排队中', 'text-secondary', 'bi-hourglass-split'],
+};
+
+function statusBadge(s) {
+    const m = STATUS[s] || [s, 'text-secondary', 'bi-circle'];
+    return `<span class="${m[1]}"><i class="bi ${m[2]}"></i> ${m[0]}</span>`;
+}
+
+function fmtDur(d) {
+    return (d != null && d !== undefined && d !== '') ? Number(d).toFixed(1) + 's' : '—';
+}
+
+function rowHtml(r) {
+    const actions = [];
+    if (r.status === 'running' || r.status === 'pending') {
+        actions.push(
+            `<button class="btn btn-warning btn-sm me-1" data-act="stop" data-id="${r.id}">` +
+            `<i class="bi bi-stop-fill"></i> 停止</button>`
+        );
+    }
+    const name = (r.name || '').replace(/"/g, '&quot;');
+    actions.push(
+        `<button class="btn btn-outline-danger btn-sm me-1" data-act="del" data-id="${r.id}" data-name="${name}">` +
+        `<i class="bi bi-trash"></i> 删除</button>`
+    );
+    actions.push(
+        `<a href="/runs/${r.id}" class="btn btn-outline-secondary btn-sm">` +
+        `<i class="bi bi-eye"></i> 查看</a>`
+    );
+    const created = (r.created_at || '').slice(0, 19);
+    const range = `${(r.start_date || '?').slice(0, 10)} ~ ${(r.end_date || '?').slice(0, 10)}`;
+    return `<tr>
+        <td class="num-mono">${r.id}</td>
+        <td>${r.name || '—'}</td>
+        <td class="num-mono">${created}</td>
+        <td>${statusBadge(r.status)}</td>
+        <td class="num-mono">${r.stock_pool || '—'}</td>
+        <td class="num-mono">${range}</td>
+        <td class="num-mono">${fmtDur(r.duration_s)}</td>
+        <td class="text-nowrap">${actions.join('')}</td>
+    </tr>`;
+}
+
+async function refresh() {
+    try {
+        const res = await fetch('/api/runs');
+        const data = await res.json();
+        const body = document.getElementById('runs-tbody');
+        if (!data.runs || data.runs.length === 0) {
+            body.innerHTML = `<tr><td colspan="8" class="text-center text-secondary py-4">暂无回测运行记录</td></tr>`;
+            return;
+        }
+        body.innerHTML = data.runs.map(rowHtml).join('');
+    } catch (e) {
+        console.error('刷新运行列表失败', e);
+    }
+}
+
+document.addEventListener('click', async function (e) {
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    const id = btn.dataset.id;
+    const act = btn.dataset.act;
+
+    if (act === 'stop') {
+        if (!confirm('确定停止该回测任务？已计算的部分结果会保留，任务将结束。')) return;
+        btn.disabled = true;
+        try {
+            const res = await fetch(`/api/runs/${id}/stop`, {method: 'POST'});
+            if (res.ok) { await refresh(); }
+            else { alert('停止失败'); btn.disabled = false; }
+        } catch (err) { alert('停止请求出错'); btn.disabled = false; }
+    } else if (act === 'del') {
+        const name = btn.dataset.name || '';
+        const label = name ? `(名称：${name})` : '';
+        if (!confirm(`确定删除运行 #${id} ${label}？\n该任务的所有结果数据（含逐股 HTML 报告文件）将被永久删除，不可恢复。`)) return;
+        btn.disabled = true;
+        try {
+            const res = await fetch(`/api/runs/${id}/delete`, {method: 'POST'});
+            const j = await res.json().catch(() => ({}));
+            if (res.ok) {
+                const files = j.removed_files || 0;
+                await refresh();
+                // 若当前在详情页且刚删的是该 run，跳回列表
+                if (window.location.pathname === `/runs/${id}`) {
+                    window.location.href = '/runs/';
+                }
+            } else {
+                alert('删除失败：' + (j.error || res.status));
+                btn.disabled = false;
+            }
+        } catch (err) { alert('删除请求出错'); btn.disabled = false; }
+    }
+});
+
+// 运行中任务每 3 秒自动刷新状态；无运行态时刷新开销极低
+refresh();
+setInterval(refresh, 3000);
+</script>
 {% endblock %}

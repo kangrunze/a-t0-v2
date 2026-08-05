@@ -59,21 +59,23 @@ def run_summary(run_id: int):
     pfs = [r["profit_factor"] for r in results if r.get("profit_factor") is not None]
     payoffs = [r["payoff_ratio"] for r in results if r.get("payoff_ratio") is not None]
 
-    def _median_or_zero(arr):
-        return round(statistics.median(arr), 4) if arr else 0.0
+    # 空数组返回 None（前端显示 "—"）：CLI 导入的运行没有 V2 测量指标
+    # （CE / Profit Factor），补 0 会把"没数据"伪装成"表现 0"。
+    def _median_or_none(arr):
+        return round(statistics.median(arr), 4) if arr else None
 
-    def _mean_or_zero(arr):
-        return round(sum(arr) / len(arr), 4) if arr else 0.0
+    def _mean_or_none(arr):
+        return round(sum(arr) / len(arr), 4) if arr else None
 
     total_net = sum(net_pnls) if net_pnls else 0.0
-    median_net = _median_or_zero(net_pnls)
-    mean_net = _mean_or_zero(net_pnls)
-    median_wr = _median_or_zero(win_rates)
-    mean_wr = _mean_or_zero(win_rates)
-    median_ce = _median_or_zero(ces)
-    mean_ce = _mean_or_zero(ces)
-    median_pf = _median_or_zero(pfs)
-    median_payoff = _median_or_zero(payoffs)
+    median_net = _median_or_none(net_pnls)
+    mean_net = _mean_or_none(net_pnls)
+    median_wr = _median_or_none(win_rates)
+    mean_wr = _mean_or_none(win_rates)
+    median_ce = _median_or_none(ces)
+    mean_ce = _mean_or_none(ces)
+    median_pf = _median_or_none(pfs)
+    median_payoff = _median_or_none(payoffs)
 
     # Stage Gate 判定
     n_samples = len(results)
@@ -90,14 +92,19 @@ def run_summary(run_id: int):
     # 个股明细
     stock_list = []
     for r in results:
+        # V2 测量指标可能为 NULL（CLI 导入的运行无这些字段），
+        # None 原样透出，前端显示 "—"，不做 round() 避免 TypeError。
+        pf = r.get("profit_factor")
+        pr = r.get("payoff_ratio")
+        ce = r.get("avg_ce")
         stock_list.append({
             "code": r["code"],
             "paired_trades": r.get("paired_trades", 0),
             "win_rate": round(r.get("win_rate", 0) * 100, 1),
             "net_pnl": round(r.get("net_pnl", 0), 2),
-            "profit_factor": round(r.get("profit_factor", 0), 2),
-            "payoff_ratio": round(r.get("payoff_ratio", 0), 4),
-            "avg_ce": round(r.get("avg_ce", 0) * 100, 2),
+            "profit_factor": round(pf, 2) if pf is not None else None,
+            "payoff_ratio": round(pr, 4) if pr is not None else None,
+            "avg_ce": round(ce * 100, 2) if ce is not None else None,
             "error": r.get("error"),
         })
 

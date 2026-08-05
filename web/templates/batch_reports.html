@@ -1,0 +1,272 @@
+{% extends "base.html" %}
+{% block title %}批量回测报告{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h2>批量回测报告</h2>
+    <div class="caption">
+        scripts/batch_backtest.py 生成的 batch_summary_*.json · 整体汇总 + 逐股明细
+    </div>
+</div>
+
+<div class="card mb-3">
+    <div class="card-body">
+        <div class="row g-3 align-items-end">
+            <div class="col-md-8">
+                <label class="form-label">选择报告</label>
+                <select id="report-select" class="form-select">
+                    <option value="">加载中…</option>
+                </select>
+            </div>
+            <div class="col-md-4 text-md-end">
+                <span id="report-meta" class="text-secondary small"></span>
+                <div class="mt-2 d-flex justify-content-end gap-2">
+                    <a id="imported-link" class="btn btn-outline-primary btn-sm d-none" href="#" target="_blank">
+                        <i class="bi bi-box-arrow-up-right"></i> 查看已导入运行
+                    </a>
+                    <button id="import-btn" class="btn btn-primary btn-sm" disabled>
+                        <i class="bi bi-download"></i> 导入为运行记录
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="empty-state" class="card d-none">
+    <div class="card-body text-center py-5">
+        <i class="bi bi-inbox" style="font-size:2rem;color:var(--color-text-secondary);"></i>
+        <p class="text-secondary mt-2">还没有批量回测报告。</p>
+        <p class="text-secondary small mb-0">
+            运行 <code>python scripts/batch_backtest.py --pool &lt;候选池&gt; --start &lt;起&gt; --end &lt;止&gt;</code>
+            后，报告会落在 <code>outputs/backtest/batch_summary_*.json</code>，刷新本页即可查看。
+        </p>
+    </div>
+</div>
+
+<div id="report-content" class="d-none">
+    {# 整体汇总卡片 #}
+    <div class="card mb-3">
+        <div class="card-header">整体汇总</div>
+        <div class="card-body">
+            <div class="row g-3" id="overall-grid"></div>
+        </div>
+    </div>
+
+    {# 逐股明细表 #}
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span>逐股明细</span>
+            <span id="perstock-count" class="text-secondary small"></span>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover table-sm mb-0" id="perstock-table">
+                    <thead>
+                        <tr>
+                            <th data-key="code" data-type="str" class="sortable">代码</th>
+                            <th data-key="net_pnl" data-type="num" class="sortable text-end">净盈亏</th>
+                            <th data-key="paired_trades" data-type="num" class="sortable text-end">配对</th>
+                            <th data-key="win_rate" data-type="pct" class="sortable text-end">胜率</th>
+                            <th data-key="net_pnl_with_unrealized" data-type="num" class="sortable text-end">含浮盈净盈亏</th>
+                            <th data-key="expired_legs_count" data-type="num" class="sortable text-end">超时腿</th>
+                            <th data-key="payoff_ratio" data-type="num" class="sortable text-end">盈亏比</th>
+                            <th data-key="error" data-type="str" class="sortable">状态</th>
+                        </tr>
+                    </thead>
+                    <tbody id="perstock-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const fmtNum = (v) => (v == null ? '—' : Number(v).toLocaleString('zh-CN', {maximumFractionDigits: 0}));
+const fmtMoney = (v) => (v == null ? '—' : (v >= 0 ? '+' : '') + Number(v).toLocaleString('zh-CN', {maximumFractionDigits: 0}));
+const fmtPct = (v) => (v == null ? '—' : (Number(v) * 100).toFixed(1) + '%');
+const fmtRatio = (v) => (v == null ? '—' : Number(v).toFixed(2));
+
+const OVERALL_FIELDS = [
+    ['stocks', '股票数', fmtNum],
+    ['total_trades', '总交易数', fmtNum],
+    ['paired_trades', '配对交易', fmtNum],
+    ['win_rate', '胜率', fmtPct],
+    ['net_pnl', '净盈亏(配对)', fmtMoney],
+    ['net_pnl_with_unrealized', '真正净盈亏(含浮盈)', fmtMoney],
+    ['unrealized_pnl', '未配对浮盈', fmtMoney],
+    ['expired_legs_count', '超时腿数', fmtNum],
+    ['expired_legs_real_pnl', '超时腿真实盈亏', fmtMoney],
+    ['profitable_stocks', '盈利股票', fmtNum],
+    ['losing_stocks', '亏损股票', fmtNum],
+    ['payoff_ratio', '盈亏比', fmtRatio],
+];
+
+let currentReport = null;
+let reportsMap = {};
+
+async function loadReports() {
+    const res = await fetch('/batch/api/reports');
+    const data = await res.json();
+    const sel = document.getElementById('report-select');
+    sel.innerHTML = '';
+    reportsMap = {};
+    if (!data.reports || data.reports.length === 0) {
+        document.getElementById('empty-state').classList.remove('d-none');
+        document.getElementById('report-content').classList.add('d-none');
+        sel.innerHTML = '<option value="">（暂无报告）</option>';
+        updateImportState(null);
+        return;
+    }
+    document.getElementById('empty-state').classList.add('d-none');
+    for (const r of data.reports) {
+        reportsMap[r.name] = r;
+        const opt = document.createElement('option');
+        opt.value = r.name;
+        const rng = `${r.start_date || '?'} ~ ${r.end_date || '?'}`;
+        const imp = r.imported_run_id ? `  ✓已导入#${r.imported_run_id}` : '';
+        opt.textContent = `${r.name}  ·  ${rng}  ·  ${fmtNum(r.stocks)}股 / 成功${r.n_ok}失败${r.n_err}${imp}`;
+        sel.appendChild(opt);
+    }
+    sel.onchange = () => { if (sel.value) loadReport(sel.value); };
+    // 默认选中最新
+    sel.value = data.reports[0].name;
+    loadReport(sel.value);
+}
+
+function updateImportState(name) {
+    const btn = document.getElementById('import-btn');
+    const link = document.getElementById('imported-link');
+    const meta = reportsMap[name] || null;
+    const impId = meta ? meta.imported_run_id : null;
+    if (impId) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="bi bi-check-circle"></i> 已导入';
+        link.classList.remove('d-none');
+        link.href = '/runs/' + impId;
+        link.innerHTML = '<i class="bi bi-box-arrow-up-right"></i> 查看运行 #' + impId;
+    } else {
+        btn.disabled = !name;
+        btn.innerHTML = '<i class="bi bi-download"></i> 导入为运行记录';
+        link.classList.add('d-none');
+    }
+}
+
+async function loadReport(name) {
+    const res = await fetch('/batch/api/report/' + encodeURIComponent(name));
+    if (!res.ok) {
+        alert('加载报告失败: ' + res.status);
+        return;
+    }
+    const r = await res.json();
+    currentReport = r;
+    renderMeta(r);
+    renderOverall(r.overall || {});
+    renderPerStock(r.per_stock || []);
+    document.getElementById('report-content').classList.remove('d-none');
+    updateImportState(name);
+}
+
+// ── 导入为运行记录 ──
+document.getElementById('import-btn').addEventListener('click', async function () {
+    const name = document.getElementById('report-select').value;
+    if (!name) return;
+    const btn = this;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span> 导入中…';
+    try {
+        const res = await fetch('/batch/api/report/' + encodeURIComponent(name) + '/import', {method: 'POST'});
+        const data = await res.json();
+        if (res.ok && data.ok) {
+            // 导入成功后跳转到运行详情页（该 CLI 回测已成为正式运行记录）
+            window.location.href = '/runs/' + data.run_id;
+        } else {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-download"></i> 导入为运行记录';
+            alert('导入失败: ' + (data.error || ('HTTP ' + res.status)));
+        }
+    } catch (e) {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-download"></i> 导入为运行记录';
+        alert('导入请求失败: ' + e.message);
+    }
+});
+
+function renderMeta(r) {
+    const el = document.getElementById('report-meta');
+    const rng = `${r.start_date || '?'} ~ ${r.end_date || '?'}`;
+    el.textContent = `区间 ${rng} · 数据源 ${r.source || '-'} · 池 ${r.pool_path ? r.pool_path.split('/').pop() : '-'}`;
+}
+
+function renderOverall(ov) {
+    const grid = document.getElementById('overall-grid');
+    grid.innerHTML = '';
+    for (const [key, label, fn] of OVERALL_FIELDS) {
+        if (!(key in ov)) continue;
+        const v = ov[key];
+        const valStr = fn(v);
+        const cls = (key.startsWith('net_pnl') || key.includes('expired_legs_real') || key === 'unrealized_pnl')
+            ? (v >= 0 ? 'text-up' : 'text-down') : '';
+        const div = document.createElement('div');
+        div.className = 'col-6 col-md-3';
+        div.innerHTML = `<div class="text-secondary small">${label}</div>`
+            + `<div class="h5 mb-0 ${cls}">${valStr}</div>`;
+        grid.appendChild(div);
+    }
+}
+
+function renderPerStock(rows) {
+    const body = document.getElementById('perstock-body');
+    body.innerHTML = '';
+    document.getElementById('perstock-count').textContent = `${rows.length} 条`;
+    for (const s of rows) {
+        const tr = document.createElement('tr');
+        if (s.error) {
+            tr.innerHTML = `<td class="num-mono">${s.code || '-'}</td>`
+                + `<td class="text-end">—</td><td class="text-end">—</td><td class="text-end">—</td>`
+                + `<td class="text-end">—</td><td class="text-end">—</td><td class="text-end">—</td>`
+                + `<td><span class="text-down"><i class="bi bi-exclamation-triangle"></i> ${s.error}</span></td>`;
+        } else {
+            const net = s.net_pnl;
+            const netU = s.net_pnl_with_unrealized;
+            const netCls = net >= 0 ? 'text-up' : 'text-down';
+            const netUCls = netU >= 0 ? 'text-up' : 'text-down';
+            tr.innerHTML = `<td class="num-mono">${s.code}</td>`
+                + `<td class="text-end ${netCls}">${fmtMoney(net)}</td>`
+                + `<td class="text-end">${fmtNum(s.paired_trades)}</td>`
+                + `<td class="text-end">${fmtPct(s.win_rate)}</td>`
+                + `<td class="text-end ${netUCls}">${fmtMoney(netU)}</td>`
+                + `<td class="text-end">${fmtNum(s.expired_legs_count)}</td>`
+                + `<td class="text-end">${fmtRatio(s.payoff_ratio)}</td>`
+                + `<td><span class="text-up"><i class="bi bi-check-circle"></i> OK</span></td>`;
+        }
+        body.appendChild(tr);
+    }
+}
+
+// 表头点击排序
+document.querySelectorAll('#perstock-table th.sortable').forEach(th => {
+    th.style.cursor = 'pointer';
+    th.addEventListener('click', () => {
+        if (!currentReport) return;
+        const key = th.dataset.key;
+        const type = th.dataset.type;
+        const rows = currentReport.per_stock || [];
+        const dir = th.dataset.dir === 'asc' ? 'desc' : 'asc';
+        document.querySelectorAll('#perstock-table th').forEach(x => x.removeAttribute('data-dir'));
+        th.dataset.dir = dir;
+        rows.sort((a, b) => {
+            let va = a[key], vb = b[key];
+            if (type === 'str') { va = va || ''; vb = vb || ''; return dir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va); }
+            va = (va == null ? -Infinity : va); vb = (vb == null ? -Infinity : vb);
+            return dir === 'asc' ? va - vb : vb - va;
+        });
+        renderPerStock(rows);
+    });
+});
+
+loadReports();
+</script>
+{% endblock %}

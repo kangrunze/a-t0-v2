@@ -60,12 +60,14 @@ def create_app() -> Flask:
     from web.blueprints.compare import bp as compare_bp
     from web.blueprints.params import bp as params_bp
     from web.blueprints.results import bp as results_bp
+    from web.blueprints.batch import bp as batch_bp
 
     app.register_blueprint(workbench_bp)
     app.register_blueprint(run_bp)
     app.register_blueprint(compare_bp)
     app.register_blueprint(params_bp)
     app.register_blueprint(results_bp)
+    app.register_blueprint(batch_bp)
 
     # ── 初始化数据库 ──
     init_db()

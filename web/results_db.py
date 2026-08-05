@@ -136,6 +136,12 @@ def init_db() -> None:
     except Exception:
         pass
 
+    # 兼容旧表：添加 source_file 列（CLI 批量回测产物导入来源，用于去重）
+    try:
+        conn.execute("ALTER TABLE runs ADD COLUMN source_file TEXT")
+    except Exception:
+        pass
+
     # 外键索引：get_run_results / get_run_summary 按 run_id 过滤，
     # 无索引会退化成全表扫描（数据量小暂时无感，运行次数多后变慢）。
     conn.execute("CREATE INDEX IF NOT EXISTS idx_results_run_id ON results(run_id)")
@@ -323,6 +329,79 @@ def get_run_summary(run_id: int) -> dict | None:
         "avg_win_rate": round(sum(r.get("win_rate", 0) for r in results) / len(results), 4),
         "avg_ce": round(sum(r.get("avg_ce", 0) for r in results) / len(results), 4),
     }
+
+
+def get_run_id_by_source_file(source_file: str) -> int | None:
+    """按导入来源文件名查找已导入的 run_id（无则 None）。"""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT id FROM runs WHERE source_file = ? LIMIT 1", (source_file,)
+    ).fetchone()
+    conn.close()
+    return row["id"] if row else None
+
+
+def import_batch_summary(source_file: str, data: dict) -> int:
+    """把 CLI 批量回测产物（batch_summary_*.json）导入为一条正式运行记录。
+
+    幂等：按 runs.source_file 去重，重复导入返回已有 run_id。
+    映射规则：
+      - run: name=报告名, tag=data.tag, start/end=data.start|start_date,
+             status='completed', source_file=报告文件名
+      - results 每只股票: net_pnl / win_rate / payoff_ratio / paired_trades /
+        error；CLI 批量产物不含 V2 测量指标（profit_factor / CE / Entry Delay
+        等），一律存 NULL（遵循"指标不可用返回 None"口径）；html_path 指向
+        逐股落盘报告 {code}_{tag}_{start}_{end}_report.html（磁盘兜底扫描）。
+    """
+    conn = get_conn()
+    try:
+        existing = conn.execute(
+            "SELECT id FROM runs WHERE source_file = ? LIMIT 1", (source_file,)
+        ).fetchone()
+        if existing:
+            return existing["id"]
+
+        start = data.get("start") or data.get("start_date") or ""
+        end = data.get("end") or data.get("end_date") or ""
+        tag = data.get("tag") or source_file.replace("batch_summary_", "").replace(".json", "")
+        cur = conn.execute(
+            """INSERT INTO runs (name, stock_pool, start_date, end_date, tag, status, progress, source_file)
+               VALUES (?, ?, ?, ?, ?, 'completed', 'done', ?)""",
+            (source_file, source_file, start, end, tag, source_file),
+        )
+        run_id = cur.lastrowid
+
+        report_root = Path(__file__).resolve().parent.parent / "outputs" / "backtest"
+        for s in data.get("per_stock", []) or []:
+            code = (s.get("code") or "").strip()
+            html_path = None
+            if code and start and end and report_root.is_dir():
+                # 逐股报告命名：{code}_{tag}_{start}_{end}_report.html（含 tag）
+                cands = sorted(report_root.glob(f"{code}_*_{start}_{end}_report.html"))
+                if cands:
+                    html_path = str(cands[-1])
+            conn.execute(
+                """INSERT INTO results (run_id, code, paired_trades, win_rate, net_pnl,
+                                        profit_factor, payoff_ratio, avg_ce,
+                                        avg_entry_delay, avg_exit_delay,
+                                        avg_remaining_move, avg_wave_number, error, html_path)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (run_id,
+                 code,
+                 s.get("paired_trades", 0),
+                 s.get("win_rate", 0),
+                 s.get("net_pnl", 0),
+                 None,  # profit_factor: CLI 产物无此指标
+                 s.get("payoff_ratio") or 0,
+                 None,  # avg_ce: CLI 产物无此指标（V2 测量需 report.json 计算）
+                 None, None, None, None,
+                 s.get("error"),
+                 html_path),
+            )
+        conn.commit()
+        return run_id
+    finally:
+        conn.close()
 
 
 def save_optuna_trial(study_name: str, trial_number: int, objective: float,
