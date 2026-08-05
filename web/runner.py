@@ -198,7 +198,8 @@ def _execute_backtest(
             "avg_remaining_move_pct": avg_remain,
             "avg_wave_number": avg_wave,
         }
-        save_result(run_id, code, result_summary)
+        html_path = _resolve_html_path(code, run_id, start_date, end_date)
+        save_result(run_id, code, result_summary, html_path=html_path)
         per_stock.append({**summary, "profit_factor": profit_factor,
                           "avg_ce": avg_ce, "avg_entry_delay_bars": avg_entry,
                           "avg_exit_delay_bars": avg_exit,
@@ -265,10 +266,58 @@ def _compute_avg_wave_number(result: dict) -> float:
     return float(val) if val else 0.0
 
 
+def _resolve_html_path(code: str, run_id: int, start_date: str, end_date: str) -> str | None:
+    """定位 run_zz500_single 落盘的逐股 HTML 报告路径。
+
+    run_zz500_single 内部 suffix=f"{tag}_{start}_{end}" (tag=f"web_{run_id}")
+    写入 BACKTEST_OUTPUT_DIR。这里按相同规则重建路径，并做存在性校验 +
+    模糊兜底（历史 tag 命名可能不同）。
+    """
+    try:
+        from scripts.backtest_zz500 import normalize_code
+        code_tag = normalize_code(code)["pure"]
+        base = PROJECT_ROOT / "outputs" / "backtest"
+        if not base.is_dir():
+            return None
+        exact = base / f"{code_tag}_web_{run_id}_{start_date}_{end_date}_report.html"
+        if exact.exists():
+            return str(exact)
+        # 模糊兜底：同 code + 同日期区间的任意报告
+        matches = sorted(base.glob(f"{code_tag}_*_{start_date}_{end_date}_report.html"))
+        if matches:
+            return str(matches[-1])
+    except Exception:
+        return None
+    return None
+
+
 def cancel_backtest(run_id: int) -> None:
     """取消正在运行的回测。"""
     from web.results_db import cancel_run
     cancel_run(run_id)
+
+
+def delete_run_artifacts(run_id: int, start_date: str | None = None,
+                         end_date: str | None = None) -> int:
+    """删除某次运行落盘的逐股 HTML 报告文件（outputs/backtest 下）。
+
+    文件名规则见 _resolve_html_path：{code_tag}_web_{run_id}_{start}_{end}_report.html。
+    按 *_web_{run_id}_*_report.html 模糊匹配，删除该 run 的全部报告。
+    返回实际删除的文件数（删除失败的文件会被跳过）。
+    """
+    base = PROJECT_ROOT / "outputs" / "backtest"
+    if not base.is_dir():
+        return 0
+    removed = 0
+    pattern = f"*_web_{run_id}_*_report.html"
+    for p in sorted(base.glob(pattern)):
+        try:
+            p.unlink()
+            removed += 1
+        except OSError:
+            # 文件被占用或其他权限问题：跳过，不阻断删除流程
+            pass
+    return removed
 
 
 def get_active_runs() -> list[dict]:

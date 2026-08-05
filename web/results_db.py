@@ -74,6 +74,7 @@ def init_db() -> None:
             avg_remaining_move REAL DEFAULT 0,
             avg_wave_number REAL DEFAULT 0,
             error TEXT,
+            html_path TEXT,
             FOREIGN KEY (run_id) REFERENCES runs(id)
         );
 
@@ -126,6 +127,12 @@ def init_db() -> None:
     # 兼容旧表：添加 cancelled 列（停止任务用）
     try:
         conn.execute("ALTER TABLE runs ADD COLUMN cancelled INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
+    # 兼容旧表：添加 html_path 列（回测 HTML 报告路径）
+    try:
+        conn.execute("ALTER TABLE results ADD COLUMN html_path TEXT")
     except Exception:
         pass
 
@@ -192,10 +199,14 @@ def get_run(run_id: int) -> dict | None:
 
 
 def cancel_run(run_id: int) -> None:
-    """请求停止某次回测（后台线程每处理完一只股票后检查此标志）。"""
+    """请求停止某次回测（后台线程每处理完一只股票后检查此标志）。
+
+    兼容 pending / running：排队中尚未开始执行的任务也会被标记为取消，
+    线程真正启动时第一只股票前检查该标志即直接退出。
+    """
     conn = get_conn()
     conn.execute(
-        "UPDATE runs SET cancelled = 1 WHERE id = ? AND status = 'running'",
+        "UPDATE runs SET cancelled = 1 WHERE id = ?",
         (run_id,),
     )
     conn.commit()
@@ -210,15 +221,15 @@ def is_run_cancelled(run_id: int) -> bool:
     return bool(row["cancelled"]) if row else False
 
 
-def save_result(run_id: int, code: str, summary: dict) -> int:
+def save_result(run_id: int, code: str, summary: dict, html_path: str | None = None) -> int:
     """保存个股结果，返回 result_id。"""
     conn = get_conn()
     cur = conn.execute(
         """INSERT INTO results (run_id, code, paired_trades, win_rate, net_pnl,
                                 profit_factor, payoff_ratio, avg_ce,
                                 avg_entry_delay, avg_exit_delay,
-                                avg_remaining_move, avg_wave_number, error)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                avg_remaining_move, avg_wave_number, error, html_path)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (run_id, code,
          summary.get("paired_trades", 0),
          summary.get("win_rate", 0),
@@ -230,7 +241,8 @@ def save_result(run_id: int, code: str, summary: dict) -> int:
          summary.get("avg_exit_delay_bars", 0),
          summary.get("avg_remaining_move_pct", 0),
          summary.get("avg_wave_number", 0),
-         summary.get("error")),
+         summary.get("error"),
+         html_path),
     )
     result_id = cur.lastrowid
     conn.commit()
@@ -424,6 +436,36 @@ def delete_preset(preset_id: int) -> None:
     conn.execute("DELETE FROM presets WHERE id = ?", (preset_id,))
     conn.commit()
     conn.close()
+
+
+def delete_run(run_id: int) -> int:
+    """硬删除一次运行及其全部关联数据，返回删除的 runs 行数。
+
+    级联删除：
+      - daily_results（通过 results 关联）
+      - results（逐股结果）
+      - config_snapshots（参数快照）
+      - runs（运行主记录）
+
+    并清理孤儿行（防止"运行中删除"竞态下后台线程晚写的游离结果）。
+    """
+    conn = get_conn()
+    conn.execute(
+        "DELETE FROM daily_results WHERE result_id IN (SELECT id FROM results WHERE run_id = ?)",
+        (run_id,),
+    )
+    conn.execute("DELETE FROM results WHERE run_id = ?", (run_id,))
+    conn.execute("DELETE FROM config_snapshots WHERE run_id = ?", (run_id,))
+    cur = conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+    n = cur.rowcount
+    # 孤儿清理：运行态删除后后台线程可能已写入部分 results / daily_results
+    conn.execute("DELETE FROM results WHERE run_id NOT IN (SELECT id FROM runs)")
+    conn.execute(
+        "DELETE FROM daily_results WHERE result_id NOT IN (SELECT id FROM results)"
+    )
+    conn.commit()
+    conn.close()
+    return n
 
 
 # 初始化

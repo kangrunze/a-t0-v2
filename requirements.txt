@@ -16,6 +16,8 @@ plotly>=5.18.0
 pandas>=2.0.0
 # pyyaml: thresholds.yaml 读写（参数配置页）
 pyyaml>=6.0
+# scipy: 策略对比页 Wilcoxon 符号秩检验（compare.py _wilcoxon_test）
+scipy>=1.11.0
 
 # ── 策略核心（回测引擎依赖）──
 numpy>=1.24.0

@@ -59,11 +59,13 @@ def create_app() -> Flask:
     from web.blueprints.run import bp as run_bp
     from web.blueprints.compare import bp as compare_bp
     from web.blueprints.params import bp as params_bp
+    from web.blueprints.results import bp as results_bp
 
     app.register_blueprint(workbench_bp)
     app.register_blueprint(run_bp)
     app.register_blueprint(compare_bp)
     app.register_blueprint(params_bp)
+    app.register_blueprint(results_bp)
 
     # ── 初始化数据库 ──
     init_db()
@@ -72,5 +74,14 @@ def create_app() -> Flask:
 
 
 if __name__ == "__main__":
+    import os
+
     app = create_app()
-    app.run(host="0.0.0.0", port=8501, threaded=True, debug=True)
+    # 安全默认：仅本机访问 + 关闭调试器。
+    # 需要局域网/云主机暴露时显式设置：
+    #   FLASK_HOST=0.0.0.0 python -m web.app
+    # 需要调试器时显式设置（仅限可信环境，Werkzeug 调试器可执行任意代码）：
+    #   FLASK_DEBUG=1 python -m web.app
+    host = os.environ.get("FLASK_HOST", "127.0.0.1")
+    debug = os.environ.get("FLASK_DEBUG") == "1"
+    app.run(host=host, port=8501, threaded=True, debug=debug)

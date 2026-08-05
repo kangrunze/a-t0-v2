@@ -22,6 +22,7 @@
                 ('run.list',           'bi-bar-chart-line', '运行详情'),
                 ('compare.index',      'bi-arrow-left-right','策略对比'),
                 ('params.index',       'bi-gear',           '参数与预设'),
+                ('results.index',      'bi-file-earmark-richtext', '回测结果'),
             ] %}
             {% for endpoint, icon, label in nav_items %}
             <a href="{{ url_for(endpoint) }}"

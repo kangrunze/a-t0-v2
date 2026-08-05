@@ -13,10 +13,10 @@ from functools import lru_cache
 
 from flask import Blueprint, render_template, request, jsonify, Response
 
-bp = Blueprint("run", __name__, url_prefix="/runs")
+bp = Blueprint("run", __name__)
 
 
-@bp.route("/")
+@bp.route("/runs/")
 def list():
     """运行列表页。"""
     from web.results_db import get_runs
@@ -24,7 +24,7 @@ def list():
     return render_template("run_list.html", runs=runs)
 
 
-@bp.route("/<int:run_id>")
+@bp.route("/runs/<int:run_id>")
 def detail(run_id: int):
     """运行详情页。"""
     return render_template("run.html", run_id=run_id)
@@ -300,6 +300,17 @@ def _render_kline_chart(run_id: int, code: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
+# API: 运行列表（JSON，供前端动态刷新）
+# ═══════════════════════════════════════════════════════════════
+@bp.route("/api/runs")
+def list_runs_json():
+    """返回运行列表 JSON（含最近 200 条）。"""
+    from web.results_db import get_runs
+    runs = get_runs(limit=200)
+    return jsonify({"runs": runs})
+
+
+# ═══════════════════════════════════════════════════════════════
 # API: 取消运行
 # ═══════════════════════════════════════════════════════════════
 @bp.route("/api/runs/<int:run_id>/cancel", methods=["POST"])
@@ -308,3 +319,43 @@ def cancel_run(run_id: int):
     from web.runner import cancel_backtest
     cancel_backtest(run_id)
     return jsonify({"ok": True})
+
+
+# ═══════════════════════════════════════════════════════════════
+# API: 停止运行（真实生效：标记取消 → 后台线程在下一股票边界退出）
+# ═══════════════════════════════════════════════════════════════
+@bp.route("/api/runs/<int:run_id>/stop", methods=["POST"])
+def stop_run(run_id: int):
+    """停止一次回测任务（支持 running / pending）。"""
+    from web.results_db import get_run
+    from web.runner import cancel_backtest
+    run = get_run(run_id)
+    if not run:
+        return jsonify({"error": "运行记录不存在"}), 404
+    cancel_backtest(run_id)
+    return jsonify({"ok": True, "status": "cancelled"})
+
+
+# ═══════════════════════════════════════════════════════════════
+# API: 删除运行（真实生效：DB 级联删除 + 磁盘报告文件删除）
+# ═══════════════════════════════════════════════════════════════
+@bp.route("/api/runs/<int:run_id>/delete", methods=["POST"])
+def delete_run_api(run_id: int):
+    """硬删除一次运行：级联删除 results/daily_results/config_snapshots，
+    并删除 outputs/backtest 下该 run 的逐股 HTML 报告文件。
+    """
+    from web.results_db import get_run, delete_run as db_delete_run
+    from web.runner import cancel_backtest, delete_run_artifacts
+
+    run = get_run(run_id)
+    if not run:
+        return jsonify({"error": "运行记录不存在"}), 404
+
+    # 若仍在运行，先请求停止，避免后台线程继续写库（delete_run 内有孤儿清理兜底）
+    if run.get("status") == "running":
+        cancel_backtest(run_id)
+
+    start, end = run.get("start_date"), run.get("end_date")
+    removed_files = delete_run_artifacts(run_id, start, end)
+    deleted = db_delete_run(run_id)
+    return jsonify({"ok": True, "deleted": deleted, "removed_files": removed_files})
