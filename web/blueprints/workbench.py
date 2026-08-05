@@ -260,6 +260,14 @@ def _resolve_stock_pool(pool_name: str) -> list[str]:
         PROJECT_ROOT / "scripts" / resolved,
         DATA_ROOT / resolved,
     ]
+    # dev-v2 重组后，样本/实验股票池位于 config/experiments 与 archive/config/experiments
+    # （含子目录 v3/mr/v4/...），递归按文件名查找
+    for base in ("config/experiments", "archive/config/experiments"):
+        base_dir = PROJECT_ROOT / base
+        if base_dir.is_dir():
+            for hit in base_dir.rglob(resolved):
+                candidates.append(hit)
+
     for path in candidates:
         if path.exists():
             codes = []
